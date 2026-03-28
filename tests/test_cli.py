@@ -21,8 +21,9 @@ class TestCli:
     def test_import_help_includes_debug(self):
         result = runner.invoke(app, ["import", "--help"])
         assert result.exit_code == 0
-        assert "--debug" in result.output
-        assert "--http-timeout" in result.output
+        output = result.output.lower()
+        assert "debug logging for troubleshooting" in output
+        assert "http timeout in seconds for musicbrainz" in output
 
     def test_import_nonexistent_dir(self):
         result = runner.invoke(app, ["import", "/nonexistent/dir", "/tmp/output"])

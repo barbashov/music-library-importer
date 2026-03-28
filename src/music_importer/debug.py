@@ -16,9 +16,7 @@ def configure_debug_logging(enabled: bool) -> None:
 
     logger = logging.getLogger("music_importer")
     handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False

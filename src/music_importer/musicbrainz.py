@@ -4,6 +4,7 @@ import logging
 import socket
 import time
 import urllib.request
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 import musicbrainzngs as mb
@@ -43,7 +44,7 @@ class MusicBrainzClient:
         self._http_timeout = http_timeout
 
     @contextmanager
-    def _mb_timeout_context(self):
+    def _mb_timeout_context(self) -> Iterator[None]:
         """Apply timeout to musicbrainzngs requests that use urllib open() defaults."""
         previous = socket.getdefaulttimeout()
         socket.setdefaulttimeout(self._http_timeout)
