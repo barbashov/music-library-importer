@@ -101,10 +101,15 @@ Options:
   --compilations-dir TEXT    Directory name for VA albums (default: Compilations)
   --no-artwork               Skip cover art embedding
   --no-tags                  Skip MusicBrainz tagging
+  --http-timeout FLOAT       HTTP timeout in seconds for MusicBrainz and cover art (default: 15)
+  --debug                    Enable debug logging for troubleshooting
   --verbose, -v              Show detailed output
   --quiet, -q                Suppress non-error output
   --version, -V              Show version
 ```
+
+`--debug` cannot be combined with `--quiet`.
+`--http-timeout` applies per request attempt (MusicBrainz retries remain enabled).
 
 ## Supported formats
 

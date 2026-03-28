@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import typer
@@ -12,6 +13,7 @@ from rich.tree import Tree
 from music_importer import __version__
 from music_importer.config import DEFAULT_COMPILATIONS_DIR
 from music_importer.converter import build_plan, execute_plan
+from music_importer.debug import configure_debug_logging
 from music_importer.models import ConversionPlan, ReleaseInfo
 from music_importer.musicbrainz import MusicBrainzClient
 from music_importer.tagger import read_source_tags
@@ -30,6 +32,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 def version_callback(value: bool) -> None:
@@ -40,15 +43,25 @@ def version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
+    ctx: typer.Context,
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Enable debug logging for troubleshooting.",
+    ),
     version: bool = typer.Option(
         False, "--version", "-V", callback=version_callback, is_eager=True, help="Show version."
     ),
 ) -> None:
     """Music Library Importer - convert and tag audio albums."""
+    ctx.obj = ctx.obj or {}
+    ctx.obj["debug"] = debug
+    configure_debug_logging(debug)
 
 
 @app.command(name="import")
 def import_album(
+    ctx: typer.Context,
     input_dir: Path = typer.Argument(
         ..., help="Input album directory.", exists=True, file_okay=False, resolve_path=True
     ),
@@ -67,10 +80,39 @@ def import_album(
     ),
     no_artwork: bool = typer.Option(False, "--no-artwork", help="Skip cover art embedding."),
     no_tags: bool = typer.Option(False, "--no-tags", help="Skip MusicBrainz tagging."),
+    http_timeout: float = typer.Option(
+        15.0,
+        "--http-timeout",
+        help="HTTP timeout in seconds for MusicBrainz and cover art requests.",
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging for troubleshooting."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress non-error output."),
 ) -> None:
     """Import and convert an album directory to ALAC/AAC with MusicBrainz tags."""
+    effective_debug = debug or bool((ctx.obj or {}).get("debug"))
+    if effective_debug and quiet:
+        console.print("[red]Error:[/red] --debug cannot be used with --quiet.")
+        raise typer.Exit(1)
+
+    configure_debug_logging(effective_debug)
+    verbose = verbose or effective_debug
+    logger.debug(
+        "Starting import input_dir=%s output_root=%s dry_run=%s format=%s interactive=%s "
+        "no_artwork=%s no_tags=%s http_timeout=%s verbose=%s quiet=%s debug=%s",
+        input_dir,
+        output_root,
+        dry_run,
+        format,
+        interactive,
+        no_artwork,
+        no_tags,
+        http_timeout,
+        verbose,
+        quiet,
+        effective_debug,
+    )
+
     # Validate format
     force_format: str | None = None
     if format == "auto":
@@ -79,6 +121,9 @@ def import_album(
         force_format = format
     else:
         console.print(f"[red]Error:[/red] Invalid format '{format}'. Use: alac, aac, or auto.")
+        raise typer.Exit(1)
+    if http_timeout <= 0:
+        console.print("[red]Error:[/red] --http-timeout must be greater than 0.")
         raise typer.Exit(1)
 
     # Check external tools
@@ -120,7 +165,10 @@ def import_album(
     cover_data = None
 
     if not no_tags:
-        mb_client = MusicBrainzClient(console=None if quiet else console)
+        mb_client = MusicBrainzClient(
+            console=None if quiet else console,
+            http_timeout=http_timeout,
+        )
 
         if not quiet:
             console.print(f"[dim]Searching MusicBrainz:[/dim] {artist_guess} — {album_guess}")

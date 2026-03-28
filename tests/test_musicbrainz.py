@@ -159,6 +159,8 @@ class TestMusicBrainzClient:
         result = client.get_cover_art("release-001", "rg-001")
         assert result == b"\x89PNG fake cover"
         assert call_count == 2
+        for call in mock_urlopen.call_args_list:
+            assert call.kwargs.get("timeout") == 15.0
 
     @patch("music_importer.musicbrainz.urllib.request.urlopen")
     def test_get_cover_art_no_release_group_returns_none(self, mock_urlopen, mock_mb):
@@ -167,6 +169,36 @@ class TestMusicBrainzClient:
 
         result = client.get_cover_art("release-001", None)
         assert result is None
+
+    @patch("music_importer.musicbrainz.socket.getdefaulttimeout", return_value=None)
+    @patch("music_importer.musicbrainz.socket.setdefaulttimeout")
+    def test_musicbrainz_request_applies_and_restores_socket_timeout(
+        self, mock_setdefaulttimeout, mock_getdefaulttimeout, mock_mb
+    ):
+        mock_mb.search_releases.return_value = {"release-list": []}
+        client = MusicBrainzClient(console=None, http_timeout=9.5)
+
+        client.search_releases("A", "B")
+
+        assert mock_setdefaulttimeout.call_count == 2
+        assert mock_setdefaulttimeout.call_args_list[0].args[0] == 9.5
+        assert mock_setdefaulttimeout.call_args_list[1].args[0] is None
+
+    @patch("music_importer.musicbrainz.urllib.request.urlopen")
+    def test_cover_art_uses_custom_timeout(self, mock_urlopen, mock_mb):
+        client = MusicBrainzClient(console=None, http_timeout=7.0)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"\x89PNG fake cover"
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.headers.get.return_value = "image/png"
+        mock_urlopen.return_value = mock_resp
+
+        result = client.get_cover_art("release-001", None)
+
+        assert result == b"\x89PNG fake cover"
+        assert mock_urlopen.call_count == 1
+        assert mock_urlopen.call_args.kwargs.get("timeout") == 7.0
 
     def test_search_releases_returns_list(self, mock_mb):
         mock_mb.search_releases.return_value = SAMPLE_RELEASE_LIST

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import shlex
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from music_importer.config import ALL_AUDIO_EXTS, LOSSLESS_CODECS, LOSSLESS_EXTS
+from music_importer.debug import truncate_text
 from music_importer.models import ConversionPlan, ConversionTask, ReleaseInfo
 from music_importer.tagger import read_source_tags, write_tags
 from music_importer.utils import (
@@ -18,22 +21,65 @@ from music_importer.utils import (
     sanitize_filename,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _run_logged(
+    cmd: list[str],
+    *,
+    timeout: int | None = None,
+    capture_output: bool = False,
+    text: bool = False,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    debug_enabled = logger.isEnabledFor(logging.DEBUG)
+    should_capture = capture_output or debug_enabled
+    should_text = text or debug_enabled
+    logger.debug("Running command: %s", shlex.join(cmd))
+    result = subprocess.run(
+        cmd,
+        timeout=timeout,
+        capture_output=should_capture,
+        text=should_text,
+        check=False,
+    )
+    if debug_enabled:
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        stderr = result.stderr if isinstance(result.stderr, str) else ""
+        logger.debug(
+            "Command finished rc=%s stdout=%s stderr=%s",
+            result.returncode,
+            truncate_text(stdout),
+            truncate_text(stderr),
+        )
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            cmd,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+
 
 def detect_codec(source: Path, force_format: str | None = None) -> str:
     """Determine output codec for a source file.
 
     Returns "alac" or "aac".
     """
+    logger.debug("Detecting codec source=%s force_format=%s", source, force_format)
     if force_format in ("alac", "aac"):
+        logger.debug("Codec forced to %s", force_format)
         return force_format
 
     # Extension-based fast path
     if source.suffix.lower() in LOSSLESS_EXTS:
+        logger.debug("Codec detected via extension as alac")
         return "alac"
 
     # Use ffprobe for accurate detection
     try:
-        result = subprocess.run(
+        result = _run_logged(
             [
                 "ffprobe",
                 "-v",
@@ -45,26 +91,32 @@ def detect_codec(source: Path, force_format: str | None = None) -> str:
                 "a:0",
                 str(source),
             ],
-            capture_output=True,
             text=True,
             timeout=10,
+            capture_output=True,
+            check=False,
         )
         data = json.loads(result.stdout)
         streams = data.get("streams", [])
         if streams:
             codec_name = streams[0].get("codec_name", "")
             if codec_name in LOSSLESS_CODECS:
+                logger.debug("Codec detected via ffprobe codec_name=%s -> alac", codec_name)
                 return "alac"
+            logger.debug("Codec detected via ffprobe codec_name=%s -> aac", codec_name)
             return "aac"
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        logger.debug("ffprobe codec detection failed; falling back to aac", exc_info=True)
         pass
 
     # Fallback: assume lossy for unknown formats
+    logger.debug("Codec fallback to aac")
     return "aac"
 
 
 def ffmpeg_convert(src: Path, dst: Path, codec: str) -> None:
     """Convert audio file using ffmpeg."""
+    logger.debug("Converting source=%s destination=%s codec=%s", src, dst, codec)
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -85,12 +137,18 @@ def ffmpeg_convert(src: Path, dst: Path, codec: str) -> None:
         cmd += ["-c:a", "aac", "-b:a", "256k"]
 
     cmd += ["-y", str(dst)]
-    subprocess.run(cmd, check=True)
+    _run_logged(cmd, text=True)
 
 
 def split_cue(cue_file: Path, audio_file: Path, tmp_dir: Path) -> list[Path]:
     """Split a single-file + CUE into per-track WAVs."""
-    subprocess.run(
+    logger.debug(
+        "Splitting CUE cue_file=%s audio_file=%s tmp_dir=%s",
+        cue_file,
+        audio_file,
+        tmp_dir,
+    )
+    _run_logged(
         [
             "shnsplit",
             "-d",
@@ -103,8 +161,8 @@ def split_cue(cue_file: Path, audio_file: Path, tmp_dir: Path) -> list[Path]:
             "-t",
             "%n",
         ],
-        check=True,
         capture_output=True,
+        text=True,
     )
     return sorted(tmp_dir.glob("*.wav"))
 
@@ -418,6 +476,13 @@ def execute_plan(
     on_progress: callable(task_index, total, task) called after each conversion.
     """
     cue_files = find_cue_files(plan.input_dir)
+    logger.debug(
+        "Executing plan input_dir=%s output_dir=%s tasks=%d cue_files=%d",
+        plan.input_dir,
+        plan.output_dir,
+        len(plan.tasks),
+        len(cue_files),
+    )
 
     if cue_files:
         _execute_cue_plan(plan, cue_files, on_progress)
@@ -455,6 +520,12 @@ def _execute_cue_plan(
                 if task_idx >= len(plan.tasks):
                     break
                 task = plan.tasks[task_idx]
+                logger.debug(
+                    "Processing CUE track index=%d source=%s destination=%s",
+                    task_idx,
+                    wav,
+                    task.destination,
+                )
                 ffmpeg_convert(wav, task.destination, task.codec)
                 write_tags(task.destination, task.tags, plan.cover_data)
                 if on_progress:
@@ -471,6 +542,12 @@ def _execute_track_plan(
     for i, task in enumerate(plan.tasks):
         if task.skipped:
             continue
+        logger.debug(
+            "Processing track index=%d source=%s destination=%s",
+            i,
+            task.source,
+            task.destination,
+        )
         ffmpeg_convert(task.source, task.destination, task.codec)
         write_tags(task.destination, task.tags, plan.cover_data)
         if on_progress:

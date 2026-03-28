@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
+import socket
 import time
 import urllib.request
+from contextlib import contextmanager
 
 import musicbrainzngs as mb
 from rich.console import Console
@@ -12,11 +15,14 @@ from music_importer.config import (
     MB_CONTACT_EMAIL,
     MB_RATE_LIMIT_SECONDS,
 )
+from music_importer.debug import preview_object, summarize_binary, truncate_text
 from music_importer.models import ReleaseInfo, TrackInfo
+
+logger = logging.getLogger(__name__)
 
 
 class MusicBrainzClient:
-    def __init__(self, console: Console | None = None):
+    def __init__(self, console: Console | None = None, http_timeout: float = 15.0):
         email = MB_CONTACT_EMAIL
         if not email:
             email = "anonymous@example.com"
@@ -26,23 +32,55 @@ class MusicBrainzClient:
                     "for MusicBrainz API compliance."
                 )
         mb.set_useragent(MB_APP_NAME, MB_APP_VERSION, email)
+        logger.debug(
+            "MusicBrainz user-agent configured app=%s version=%s timeout=%s",
+            MB_APP_NAME,
+            MB_APP_VERSION,
+            http_timeout,
+        )
         self._last_request: float = 0.0
         self._console = console
+        self._http_timeout = http_timeout
+
+    @contextmanager
+    def _mb_timeout_context(self):
+        """Apply timeout to musicbrainzngs requests that use urllib open() defaults."""
+        previous = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(self._http_timeout)
+        try:
+            yield
+        finally:
+            socket.setdefaulttimeout(previous)
 
     def _rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_request
         if elapsed < MB_RATE_LIMIT_SECONDS:
+            logger.debug("Rate limiting sleep_seconds=%.3f", MB_RATE_LIMIT_SECONDS - elapsed)
             time.sleep(MB_RATE_LIMIT_SECONDS - elapsed)
         self._last_request = time.monotonic()
 
     def search_releases(self, artist: str, album: str, limit: int = 5) -> list[dict]:
         """Search MB for releases, return list of matches."""
         self._rate_limit()
+        logger.debug(
+            "MusicBrainz search_releases request artist=%r album=%r limit=%d timeout=%s",
+            artist,
+            album,
+            limit,
+            self._http_timeout,
+        )
         try:
-            result = mb.search_releases(artist=artist, release=album, limit=limit)
+            with self._mb_timeout_context():
+                result = mb.search_releases(artist=artist, release=album, limit=limit)
             releases: list[dict] = result.get("release-list", [])
+            logger.debug(
+                "MusicBrainz search_releases response count=%d payload=%s",
+                len(releases),
+                preview_object(result),
+            )
             return releases
         except mb.WebServiceError as e:
+            logger.debug("MusicBrainz search_releases failed", exc_info=True)
             if self._console:
                 self._console.print(f"[red]MusicBrainz search error:[/red] {e}")
             return []
@@ -61,15 +99,26 @@ class MusicBrainzClient:
     def get_release_details(self, release_id: str) -> ReleaseInfo | None:
         """Fetch full release details and build ReleaseInfo."""
         self._rate_limit()
+        logger.debug(
+            "MusicBrainz get_release_by_id request release_id=%s timeout=%s",
+            release_id,
+            self._http_timeout,
+        )
         try:
-            result = mb.get_release_by_id(
-                release_id,
-                includes=["recordings", "artists", "labels", "release-groups", "media"],
-            )
+            with self._mb_timeout_context():
+                result = mb.get_release_by_id(
+                    release_id,
+                    includes=["recordings", "artists", "labels", "release-groups", "media"],
+                )
             release = result.get("release")
+            logger.debug(
+                "MusicBrainz get_release_by_id response payload=%s",
+                preview_object(result),
+            )
             if not release:
                 return None
         except mb.WebServiceError as e:
+            logger.debug("MusicBrainz get_release_by_id failed", exc_info=True)
             if self._console:
                 self._console.print(f"[red]MusicBrainz fetch error:[/red] {e}")
             return None
@@ -108,6 +157,7 @@ class MusicBrainzClient:
     def get_cover_art(self, release_id: str, release_group_id: str | None = None) -> bytes | None:
         """Fetch cover art. Try release first, then release-group as fallback."""
         url = f"https://coverartarchive.org/release/{release_id}/front-500"
+        logger.debug("Cover art request url=%s", url)
         data = self._fetch_cover(url)
         if data:
             return data
@@ -115,6 +165,7 @@ class MusicBrainzClient:
         # Fallback to release-group cover art
         if release_group_id:
             rg_url = f"https://coverartarchive.org/release-group/{release_group_id}/front-500"
+            logger.debug("Cover art fallback request url=%s", rg_url)
             return self._fetch_cover(rg_url)
 
         return None
@@ -124,10 +175,24 @@ class MusicBrainzClient:
             req = urllib.request.Request(
                 url, headers={"User-Agent": f"{MB_APP_NAME}/{MB_APP_VERSION}"}
             )
-            with urllib.request.urlopen(req, timeout=15) as r:
+            logger.debug("Cover art request timeout_seconds=%s", self._http_timeout)
+            with urllib.request.urlopen(req, timeout=self._http_timeout) as r:
                 data: bytes = r.read()
+                content_type = r.headers.get("Content-Type")
+                status = getattr(r, "status", None)
+                logger.debug(
+                    "Cover art response status=%s summary=%s",
+                    status,
+                    summarize_binary(data, content_type=content_type),
+                )
+                if content_type and content_type.startswith("text/"):
+                    logger.debug(
+                        "Cover art text body preview=%s",
+                        truncate_text(data.decode(errors="replace")),
+                    )
                 return data
         except Exception:
+            logger.debug("Cover art fetch failed url=%s", url, exc_info=True)
             return None
 
     def _build_track_map(self, release: dict) -> dict[int, TrackInfo]:
