@@ -35,7 +35,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ### Clone and install
 
 ```bash
-git clone https://github.com/your-username/music-library-importer.git
+git clone https://github.com/barbashov/music-library-importer.git
 cd music-library-importer
 uv sync
 ```
@@ -148,11 +148,9 @@ docker run --rm \
   -v /path/to/album:/input:ro \
   -v /path/to/music/library:/output \
   -e MUSIC_IMPORTER_EMAIL=you@example.com \
-  ghcr.io/your-username/music-library-importer:latest \
+  ghcr.io/barbashov/music-library-importer:latest \
   import /input /output
 ```
-
-Replace `your-username` with the GitHub repository owner.
 
 ### Dry run with Docker
 
@@ -160,7 +158,7 @@ Replace `your-username` with the GitHub repository owner.
 docker run --rm \
   -v /path/to/album:/input:ro \
   -v /path/to/music/library:/output \
-  ghcr.io/your-username/music-library-importer:latest \
+  ghcr.io/barbashov/music-library-importer:latest \
   import --dry-run /input /output
 ```
 
