@@ -195,7 +195,7 @@ output_root/
 ### Run from GHCR (no local install needed)
 
 ```bash
-docker run --rm \
+docker run -t --rm \
   -v /path/to/album:/input:ro \
   -v /path/to/music/library:/output \
   -e HTTPS_PROXY=socks5://10.0.35.20:1080 \
@@ -207,7 +207,7 @@ docker run --rm \
 ### Dry run with Docker
 
 ```bash
-docker run --rm \
+docker run -t --rm \
   -v /path/to/album:/input:ro \
   -v /path/to/music/library:/output \
   ghcr.io/barbashov/music-library-importer:latest \
@@ -218,7 +218,7 @@ docker run --rm \
 
 ```bash
 docker build -t music-importer .
-docker run --rm \
+docker run -t --rm \
   -v /path/to/album:/input:ro \
   -v /path/to/music/library:/output \
   music-importer import /input /output
@@ -231,6 +231,7 @@ docker run --rm \
 - The image includes `ffmpeg` -- no system dependencies needed
 - Multi-arch image: supports both `linux/amd64` and `linux/arm64`
 - `latest` tag always points to the most recent build from `main`
+- Use `-t` to allocate a pseudo-TTY for the animated progress bar; without it, progress is shown as one line per track
 
 ## Development
 
