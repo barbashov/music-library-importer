@@ -59,6 +59,38 @@ def check_shnsplit_available() -> bool:
     return shutil.which("shnsplit") is not None
 
 
+def check_cue_dependencies(input_dir: Path) -> list[str]:
+    """Return missing external tools required for splitting CUE-based inputs.
+
+    For CUE+FLAC workflows, both ``shnsplit`` and ``flac`` are required.
+    """
+    cue_files = find_cue_files(input_dir)
+    if not cue_files:
+        return []
+
+    has_splittable_cue = False
+    requires_flac_decoder = False
+    for cue_file in cue_files:
+        for ext in ALL_AUDIO_EXTS:
+            candidate = cue_file.with_suffix(ext)
+            if not candidate.exists():
+                continue
+            has_splittable_cue = True
+            if candidate.suffix.lower() == ".flac":
+                requires_flac_decoder = True
+            break
+
+    if not has_splittable_cue:
+        return []
+
+    missing: list[str] = []
+    if shutil.which("shnsplit") is None:
+        missing.append("shnsplit")
+    if requires_flac_decoder and shutil.which("flac") is None:
+        missing.append("flac")
+    return missing
+
+
 def normalize_metadata_value(value: str | None) -> str:
     if value is None:
         return ""

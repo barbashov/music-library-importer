@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -23,6 +24,7 @@ from music_importer.models import ConversionPlan, ReleaseInfo
 from music_importer.musicbrainz import MusicBrainzClient, ReleaseSelectionHints
 from music_importer.tagger import read_source_tags
 from music_importer.utils import (
+    check_cue_dependencies,
     check_external_tools,
     detect_disc_subdirs,
     find_audio_files,
@@ -197,6 +199,9 @@ def import_album(
 
     # Check external tools
     missing = check_external_tools()
+    for tool in check_cue_dependencies(input_dir):
+        if tool not in missing:
+            missing.append(tool)
     if missing:
         if json_mode:
             exit_json_error(
@@ -208,8 +213,8 @@ def import_album(
             Panel(
                 f"[red]Missing required tools:[/red] {', '.join(missing)}\n\n"
                 "Install with:\n"
-                "  [cyan]sudo apt install ffmpeg[/cyan] (Ubuntu)\n"
-                "  [cyan]brew install ffmpeg[/cyan] (macOS)",
+                "  [cyan]sudo apt install ffmpeg shntool flac[/cyan] (Ubuntu)\n"
+                "  [cyan]brew install ffmpeg shntool flac[/cyan] (macOS)",
                 title="Missing Dependencies",
                 border_style="red",
             )
@@ -412,6 +417,10 @@ def import_album(
     if not quiet and not json_mode:
         _print_album_header(plan)
 
+    if output_dir is None:  # pragma: no cover - defensive
+        raise RuntimeError("Output directory was not resolved before execution.")
+    preexisting_destination_dirs = _snapshot_existing_destination_dirs(output_root, output_dir)
+
     if json_mode:
 
         def on_progress(idx: int, total: int, task: object) -> None:
@@ -422,6 +431,11 @@ def import_album(
         try:
             execute_plan(plan, on_progress=on_progress)
         except subprocess.CalledProcessError as exc:
+            _rollback_failed_destination(
+                output_root=output_root,
+                output_dir=output_dir,
+                preexisting_dirs=preexisting_destination_dirs,
+            )
             failed_task = (
                 _task_to_json(plan.tasks[completed_tracks], completed_tracks + 1)
                 if completed_tracks < len(plan.tasks)
@@ -439,6 +453,11 @@ def import_album(
                 },
             )
         except Exception as exc:  # pragma: no cover - defensive safety net
+            _rollback_failed_destination(
+                output_root=output_root,
+                output_dir=output_dir,
+                preexisting_dirs=preexisting_destination_dirs,
+            )
             failed_task = (
                 _task_to_json(plan.tasks[completed_tracks], completed_tracks + 1)
                 if completed_tracks < len(plan.tasks)
@@ -482,7 +501,15 @@ def import_album(
             title = getattr(task, "tags", {}).get("title", "")
             progress.update(task_id, advance=1, description=f"Converting: {title}")
 
-        execute_plan(plan, on_progress=on_progress)
+        try:
+            execute_plan(plan, on_progress=on_progress)
+        except Exception:
+            _rollback_failed_destination(
+                output_root=output_root,
+                output_dir=output_dir,
+                preexisting_dirs=preexisting_destination_dirs,
+            )
+            raise
 
     if not quiet:
         console.print(
@@ -503,6 +530,75 @@ def _coerce_process_output(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return str(value)
+
+
+def _snapshot_existing_destination_dirs(output_root: Path, output_dir: Path) -> set[Path]:
+    existing: set[Path] = set()
+    if not _is_within_path(output_dir, output_root):
+        return existing
+
+    current = output_dir
+    while True:
+        if current.exists() and current.is_dir():
+            existing.add(current)
+        if current == output_root:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return existing
+
+
+def _rollback_failed_destination(
+    *,
+    output_root: Path,
+    output_dir: Path | None,
+    preexisting_dirs: set[Path],
+) -> None:
+    if output_dir is None:
+        return
+    if not _is_within_path(output_dir, output_root):
+        logger.warning(
+            "Skipping rollback because output_dir=%s is outside output_root=%s",
+            output_dir,
+            output_root,
+        )
+        return
+
+    try:
+        if output_dir.exists():
+            logger.debug("Rollback removing output_dir=%s", output_dir)
+            shutil.rmtree(output_dir)
+    except OSError:
+        logger.exception("Rollback failed while deleting output_dir=%s", output_dir)
+        return
+
+    current = output_dir.parent
+    while _is_within_path(current, output_root):
+        if current in preexisting_dirs:
+            break
+        try:
+            current.rmdir()
+            logger.debug("Rollback removed empty directory=%s", current)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            break
+        if current == output_root:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
+def _is_within_path(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _task_to_json(task: object, index: int) -> dict[str, Any]:

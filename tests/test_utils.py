@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from music_importer.utils import (
+    check_cue_dependencies,
     check_external_tools,
     detect_disc_subdirs,
     find_audio_files,
@@ -109,6 +110,44 @@ class TestCheckExternalTools:
             missing = check_external_tools()
             assert "ffmpeg" in missing
             assert "ffprobe" in missing
+
+
+class TestCheckCueDependencies:
+    def test_no_cue_files(self, tmp_path):
+        (tmp_path / "01.flac").touch()
+        assert check_cue_dependencies(tmp_path) == []
+
+    def test_cue_with_flac_requires_shnsplit_and_flac(self, tmp_path):
+        cue = tmp_path / "album.cue"
+        cue.touch()
+        (tmp_path / "album.flac").touch()
+
+        def fake_which(name):
+            if name in {"shnsplit", "flac"}:
+                return None
+            return "/usr/bin/" + name
+
+        with patch("music_importer.utils.shutil.which", side_effect=fake_which):
+            missing = check_cue_dependencies(tmp_path)
+        assert "shnsplit" in missing
+        assert "flac" in missing
+
+    def test_cue_with_flac_all_present(self, tmp_path):
+        cue = tmp_path / "album.cue"
+        cue.touch()
+        (tmp_path / "album.flac").touch()
+
+        def fake_which(name):
+            return "/usr/bin/" + name
+
+        with patch("music_importer.utils.shutil.which", side_effect=fake_which):
+            missing = check_cue_dependencies(tmp_path)
+        assert missing == []
+
+    def test_cue_without_matching_audio_is_ignored(self, tmp_path):
+        (tmp_path / "album.cue").touch()
+        with patch("music_importer.utils.shutil.which", return_value=None):
+            assert check_cue_dependencies(tmp_path) == []
 
 
 class TestFindAudioFiles:

@@ -11,7 +11,7 @@ RUN uv sync --frozen --no-dev --no-editable
 FROM python:3.12-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg shntool && \
+    apt-get install -y --no-install-recommends ffmpeg shntool flac && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.venv /app/.venv
