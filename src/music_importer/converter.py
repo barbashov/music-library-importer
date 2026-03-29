@@ -5,7 +5,6 @@ import logging
 import re
 import shlex
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -140,31 +139,44 @@ def ffmpeg_convert(src: Path, dst: Path, codec: str) -> None:
     _run_logged(cmd, text=True)
 
 
-def split_cue(cue_file: Path, audio_file: Path, tmp_dir: Path) -> list[Path]:
-    """Split a single-file + CUE into per-track WAVs."""
+def parse_cue_timestamps(cue_file: Path) -> list[float]:
+    """Return INDEX 01 start times in seconds for each track."""
+    timestamps: list[float] = []
+    with open(cue_file, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = re.match(r"\s+INDEX 01\s+(\d+):(\d+):(\d+)", line)
+            if m:
+                mm, ss, ff = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                timestamps.append(mm * 60 + ss + ff / 75.0)
+    return timestamps
+
+
+def ffmpeg_convert_segment(
+    src: Path, dst: Path, codec: str, start: float, duration: float | None
+) -> None:
+    """Convert a time segment of an audio file using ffmpeg."""
     logger.debug(
-        "Splitting CUE cue_file=%s audio_file=%s tmp_dir=%s",
-        cue_file,
-        audio_file,
-        tmp_dir,
+        "Converting segment source=%s destination=%s codec=%s start=%s duration=%s",
+        src,
+        dst,
+        codec,
+        start,
+        duration,
     )
-    _run_logged(
-        [
-            "shnsplit",
-            "-d",
-            str(tmp_dir),
-            "-f",
-            str(cue_file),
-            "-o",
-            "flac",
-            str(audio_file),
-            "-t",
-            "%n",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    return sorted(tmp_dir.glob("*.flac"))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(start)]
+    if duration is not None:
+        cmd += ["-t", str(duration)]
+    cmd += ["-i", str(src), "-map", "0:a"]
+
+    if codec == "alac":
+        cmd += ["-c:a", "alac"]
+    else:
+        cmd += ["-c:a", "aac", "-b:a", "256k"]
+
+    cmd += ["-y", str(dst)]
+    _run_logged(cmd, text=True)
 
 
 def parse_cue_titles(cue_file: Path) -> list[str]:
@@ -497,40 +509,44 @@ def _execute_cue_plan(
 ) -> None:
     plan.output_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        task_idx = 0
+    task_idx = 0
 
-        for cue_file in cue_files:
-            audio_file = None
-            for ext in ALL_AUDIO_EXTS:
-                candidate = cue_file.with_suffix(ext)
-                if candidate.exists():
-                    audio_file = candidate
-                    break
+    for cue_file in cue_files:
+        audio_file = None
+        for ext in ALL_AUDIO_EXTS:
+            candidate = cue_file.with_suffix(ext)
+            if candidate.exists():
+                audio_file = candidate
+                break
 
-            if not audio_file:
-                continue
+        if not audio_file:
+            continue
 
-            cue_tmp = tmp_path / cue_file.stem
-            cue_tmp.mkdir(exist_ok=True)
-            wav_tracks = split_cue(cue_file, audio_file, cue_tmp)
+        timestamps = parse_cue_timestamps(cue_file)
+        logger.debug(
+            "CUE timestamps cue_file=%s count=%d", cue_file, len(timestamps)
+        )
 
-            for wav in wav_tracks:
-                if task_idx >= len(plan.tasks):
-                    break
-                task = plan.tasks[task_idx]
-                logger.debug(
-                    "Processing CUE track index=%d source=%s destination=%s",
-                    task_idx,
-                    wav,
-                    task.destination,
-                )
-                ffmpeg_convert(wav, task.destination, task.codec)
-                write_tags(task.destination, task.tags, plan.cover_data)
-                if on_progress:
-                    on_progress(task_idx, len(plan.tasks), task)
-                task_idx += 1
+        for i, start in enumerate(timestamps):
+            if task_idx >= len(plan.tasks):
+                break
+            task = plan.tasks[task_idx]
+            duration = (
+                timestamps[i + 1] - start if i + 1 < len(timestamps) else None
+            )
+            logger.debug(
+                "Processing CUE track index=%d source=%s destination=%s start=%s duration=%s",
+                task_idx,
+                audio_file,
+                task.destination,
+                start,
+                duration,
+            )
+            ffmpeg_convert_segment(audio_file, task.destination, task.codec, start, duration)
+            write_tags(task.destination, task.tags, plan.cover_data)
+            if on_progress:
+                on_progress(task_idx, len(plan.tasks), task)
+            task_idx += 1
 
 
 def _execute_track_plan(

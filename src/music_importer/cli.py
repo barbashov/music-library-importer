@@ -213,8 +213,8 @@ def import_album(
             Panel(
                 f"[red]Missing required tools:[/red] {', '.join(missing)}\n\n"
                 "Install with:\n"
-                "  [cyan]sudo apt install ffmpeg shntool flac[/cyan] (Ubuntu)\n"
-                "  [cyan]brew install ffmpeg shntool flac[/cyan] (macOS)",
+                "  [cyan]sudo apt install ffmpeg[/cyan] (Ubuntu)\n"
+                "  [cyan]brew install ffmpeg[/cyan] (macOS)",
                 title="Missing Dependencies",
                 border_style="red",
             )
