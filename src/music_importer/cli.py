@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
+import subprocess
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -59,10 +62,14 @@ def main(
     version: bool = typer.Option(
         False, "--version", "-V", callback=version_callback, is_eager=True, help="Show version."
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON output for commands."
+    ),
 ) -> None:
     """Music Library Importer - convert and tag audio albums."""
     ctx.obj = ctx.obj or {}
     ctx.obj["debug"] = debug
+    ctx.obj["json"] = json_output
     configure_debug_logging(debug)
 
 
@@ -97,12 +104,48 @@ def import_album(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress non-error output."),
 ) -> None:
     """Import and convert an album directory to ALAC/AAC with MusicBrainz tags."""
+    json_mode = bool((ctx.obj or {}).get("json"))
     effective_debug = debug or bool((ctx.obj or {}).get("debug"))
+    mode = "dry-run" if dry_run else "execute"
+    output_dir: Path | None = None
+    metadata: dict[str, Any] | None = None
+    json_warnings: list[str] = []
+    release_info: ReleaseInfo | None = None
+    plan: ConversionPlan | None = None
+    completed_tracks = 0
+
+    def exit_json_error(
+        code: str,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        _emit_json(
+            _build_import_result(
+                ok=False,
+                mode=mode,
+                input_dir=input_dir,
+                output_root=output_root,
+                output_dir=output_dir,
+                metadata=metadata,
+                release_info=release_info,
+                plan=plan,
+                warnings=json_warnings,
+                tracks_completed=completed_tracks,
+                error={"code": code, "message": message, "details": details or {}},
+            )
+        )
+        raise typer.Exit(1)
+
     if effective_debug and quiet:
+        if json_mode:
+            exit_json_error("debug_quiet_conflict", "--debug cannot be used with --quiet.")
         console.print("[red]Error:[/red] --debug cannot be used with --quiet.")
         raise typer.Exit(1)
 
     configure_debug_logging(effective_debug)
+    if json_mode and not effective_debug:
+        logging.getLogger("music_importer").setLevel(logging.INFO)
     verbose = verbose or effective_debug
     logger.debug(
         "Starting import input_dir=%s output_root=%s dry_run=%s format=%s interactive=%s "
@@ -119,6 +162,11 @@ def import_album(
         quiet,
         effective_debug,
     )
+    if interactive and json_mode:
+        exit_json_error(
+            "interactive_not_supported_in_json",
+            "--interactive is not supported with --json.",
+        )
 
     # Validate format
     force_format: str | None = None
@@ -127,15 +175,33 @@ def import_album(
     elif format in ("alac", "aac"):
         force_format = format
     else:
+        if json_mode:
+            exit_json_error(
+                "invalid_format",
+                f"Invalid format '{format}'. Use: alac, aac, or auto.",
+                details={"format": format},
+            )
         console.print(f"[red]Error:[/red] Invalid format '{format}'. Use: alac, aac, or auto.")
         raise typer.Exit(1)
     if http_timeout <= 0:
+        if json_mode:
+            exit_json_error(
+                "invalid_http_timeout",
+                "--http-timeout must be greater than 0.",
+                details={"http_timeout": http_timeout},
+            )
         console.print("[red]Error:[/red] --http-timeout must be greater than 0.")
         raise typer.Exit(1)
 
     # Check external tools
     missing = check_external_tools()
     if missing:
+        if json_mode:
+            exit_json_error(
+                "missing_dependencies",
+                "Missing required tools.",
+                details={"missing_tools": missing},
+            )
         console.print(
             Panel(
                 f"[red]Missing required tools:[/red] {', '.join(missing)}\n\n"
@@ -160,17 +226,17 @@ def import_album(
     album_guess = _normalize_album_guess(tag_album_guess) or _normalize_album_guess(dir_album_guess)
 
     # MusicBrainz lookup
-    release_info = None
     cover_data = None
 
     if not no_tags:
         mb_client = MusicBrainzClient(
-            console=None if quiet else console,
+            console=None if quiet or json_mode else console,
             http_timeout=http_timeout,
         )
 
         if not album_guess:
-            if not quiet:
+            json_warnings.append("Skipping MusicBrainz: insufficient album metadata for lookup.")
+            if not quiet and not json_mode:
                 console.print(
                     "[yellow]Skipping MusicBrainz:[/yellow] insufficient album metadata for lookup."
                 )
@@ -178,7 +244,7 @@ def import_album(
             attempts = _build_lookup_attempts(artist_guess, album_guess, filename_artist_guess)
             if interactive:
                 for query_artist, query_album in attempts:
-                    if not quiet:
+                    if not quiet and not json_mode:
                         console.print(
                             f"[dim]Searching MusicBrainz:[/dim] "
                             f"{_format_lookup_query(query_artist, query_album)}"
@@ -190,7 +256,7 @@ def import_album(
                         break
             else:
                 for query_artist, query_album in attempts:
-                    if not quiet:
+                    if not quiet and not json_mode:
                         console.print(
                             f"[dim]Searching MusicBrainz:[/dim] "
                             f"{_format_lookup_query(query_artist, query_album)}"
@@ -199,7 +265,7 @@ def import_album(
                     if not release:
                         continue
                     release_id = release["id"]
-                    if not quiet:
+                    if not quiet and not json_mode:
                         console.print(
                             f"[green]Found:[/green] {release.get('title')} "
                             f"[dim](id: {release_id})[/dim]"
@@ -207,16 +273,20 @@ def import_album(
                     release_info = mb_client.get_release_details(release_id)
                     break
 
-            if not release_info and not quiet:
+            if not release_info:
+                json_warnings.append("No MusicBrainz match found.")
+            if not release_info and not quiet and not json_mode:
                 console.print("[yellow]No MusicBrainz match found.[/yellow]")
 
         if release_info and not no_artwork:
             cover_data = mb_client.get_cover_art(
                 release_info.release_id, release_info.release_group_id
             )
-            if cover_data and not quiet:
+            if cover_data and not quiet and not json_mode:
                 console.print(f"[green]Cover art:[/green] {len(cover_data) // 1024} KB")
-            elif not cover_data and not quiet:
+            elif not cover_data:
+                json_warnings.append("No cover art found.")
+            if not cover_data and not quiet and not json_mode:
                 console.print("[yellow]No cover art found.[/yellow]")
 
     # Resolve final metadata
@@ -246,9 +316,22 @@ def import_album(
 
     album_dir = sanitize_filename(album_title)
     output_dir = output_root / artist_dir / album_dir
+    metadata = {
+        "artist": album_artist,
+        "album": album_title,
+        "year": year,
+        "genre": genre,
+        "metadata_source": "musicbrainz" if release_info else "filename",
+    }
 
     # Check existing destination
     if output_dir.exists() and not dry_run:
+        if json_mode:
+            exit_json_error(
+                "output_conflict",
+                f"Album directory already exists: {output_dir}",
+                details={"output_dir": str(output_dir)},
+            )
         console.print(
             Panel(
                 f"[red]Album directory already exists:[/red]\n{output_dir}\n\n"
@@ -272,8 +355,15 @@ def import_album(
         dry_run=dry_run,
     )
     plan.cover_data = cover_data
+    metadata["metadata_source"] = plan.metadata_source
 
     if not plan.tasks:
+        if json_mode:
+            exit_json_error(
+                "no_audio_files",
+                "No audio files found to process.",
+                details={"plan_warnings": plan.warnings},
+            )
         console.print("[red]Error:[/red] No audio files found to process.")
         if plan.warnings:
             for w in plan.warnings:
@@ -281,6 +371,24 @@ def import_album(
         raise typer.Exit(1)
 
     if dry_run:
+        if json_mode:
+            if output_dir.exists():
+                json_warnings.append(f"Output directory already exists: {output_dir}")
+            _emit_json(
+                _build_import_result(
+                    ok=True,
+                    mode=mode,
+                    input_dir=input_dir,
+                    output_root=output_root,
+                    output_dir=output_dir,
+                    metadata=metadata,
+                    release_info=release_info,
+                    plan=plan,
+                    warnings=json_warnings,
+                    tracks_completed=0,
+                )
+            )
+            return
         display_plan(plan, verbose)
         if output_dir.exists():
             console.print(
@@ -289,8 +397,61 @@ def import_album(
         return
 
     # Execute
-    if not quiet:
+    if not quiet and not json_mode:
         _print_album_header(plan)
+
+    if json_mode:
+        def on_progress(idx: int, total: int, task: object) -> None:
+            del total, task
+            nonlocal completed_tracks
+            completed_tracks = idx + 1
+
+        try:
+            execute_plan(plan, on_progress=on_progress)
+        except subprocess.CalledProcessError as exc:
+            failed_task = (
+                _task_to_json(plan.tasks[completed_tracks], completed_tracks + 1)
+                if completed_tracks < len(plan.tasks)
+                else None
+            )
+            exit_json_error(
+                "conversion_failed",
+                "Conversion command failed.",
+                details={
+                    "returncode": exc.returncode,
+                    "command": [str(part) for part in exc.cmd] if exc.cmd else [],
+                    "stderr": _coerce_process_output(exc.stderr),
+                    "stdout": _coerce_process_output(exc.output),
+                    "failed_track": failed_task,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive safety net
+            failed_task = (
+                _task_to_json(plan.tasks[completed_tracks], completed_tracks + 1)
+                if completed_tracks < len(plan.tasks)
+                else None
+            )
+            exit_json_error(
+                "unexpected_error",
+                str(exc),
+                details={"exception_type": type(exc).__name__, "failed_track": failed_task},
+            )
+
+        _emit_json(
+            _build_import_result(
+                ok=True,
+                mode=mode,
+                input_dir=input_dir,
+                output_root=output_root,
+                output_dir=output_dir,
+                metadata=metadata,
+                release_info=release_info,
+                plan=plan,
+                warnings=json_warnings,
+                tracks_completed=completed_tracks,
+            )
+        )
+        return
 
     with Progress(
         SpinnerColumn(),
@@ -304,6 +465,7 @@ def import_album(
         task_id = progress.add_task("Converting...", total=len(plan.tasks))
 
         def on_progress(idx: int, total: int, task: object) -> None:
+            del idx, total
             title = getattr(task, "tags", {}).get("title", "")
             progress.update(task_id, advance=1, description=f"Converting: {title}")
 
@@ -316,6 +478,85 @@ def import_album(
                 border_style="green",
             )
         )
+
+
+def _emit_json(payload: dict[str, Any]) -> None:
+    typer.echo(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def _coerce_process_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
+def _task_to_json(task: object, index: int) -> dict[str, Any]:
+    source = getattr(task, "source", "")
+    destination = getattr(task, "destination", "")
+    codec = getattr(task, "codec", "")
+    tags = getattr(task, "tags", {})
+    return {
+        "index": index,
+        "source": str(source),
+        "destination": str(destination),
+        "codec": codec,
+        "tags": tags if isinstance(tags, dict) else {},
+    }
+
+
+def _build_import_result(
+    *,
+    ok: bool,
+    mode: str,
+    input_dir: Path,
+    output_root: Path,
+    output_dir: Path | None,
+    metadata: dict[str, Any] | None,
+    release_info: ReleaseInfo | None,
+    plan: ConversionPlan | None,
+    warnings: list[str],
+    tracks_completed: int,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    track_payload = (
+        [_task_to_json(task, idx + 1) for idx, task in enumerate(plan.tasks)] if plan else []
+    )
+    track_total = len(track_payload)
+    return {
+        "ok": ok,
+        "command": "import",
+        "mode": mode,
+        "input_dir": str(input_dir),
+        "output_root": str(output_root),
+        "output_dir": str(output_dir) if output_dir else None,
+        "metadata": metadata
+        or {
+            "artist": "",
+            "album": "",
+            "year": "",
+            "genre": "",
+            "metadata_source": "",
+        },
+        "musicbrainz": {
+            "matched": release_info is not None,
+            "release_id": release_info.release_id if release_info else None,
+            "release_group_id": release_info.release_group_id if release_info else None,
+        },
+        "cover_art": {
+            "present": bool(plan and plan.cover_data),
+            "bytes": len(plan.cover_data) if plan and plan.cover_data else 0,
+        },
+        "summary": {
+            "dry_run": mode == "dry-run",
+            "tracks_total": track_total,
+            "tracks_completed": min(tracks_completed, track_total),
+        },
+        "tracks": track_payload,
+        "warnings": [*warnings, *(plan.warnings if plan else [])],
+        "error": error,
+    }
 
 
 def _normalize_artist_guess(value: str | None) -> str | None:

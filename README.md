@@ -11,6 +11,7 @@ Convert audio albums to ALAC/AAC and tag them automatically via MusicBrainz. Des
 - **Compilations**: Various Artists albums go into a configurable `Compilations/` directory
 - **Navidrome-friendly**: Consistent year tags across all tracks (prevents album splitting)
 - **Dry run mode**: Preview all changes before executing
+- **JSON mode**: Machine-readable output for automation (`--json`)
 - **Interactive mode**: Choose from multiple MusicBrainz matches
 - **Source tag fallback**: Reads existing tags from source files when MusicBrainz lookup fails
 - **Pretty CLI**: Rich progress bars, tables, and color-coded output
@@ -71,6 +72,19 @@ This will:
 uv run music-importer import --dry-run /path/to/album /path/to/library
 ```
 
+### JSON output for automation
+
+```bash
+# Dry run JSON
+uv run music-importer --json import --dry-run /path/to/album /path/to/library
+
+# Execute JSON
+uv run music-importer --json import /path/to/album /path/to/library
+```
+
+`--json` prints a single JSON object for `import` (success or error), designed for scripts/agents.
+Help output remains regular CLI help text. `--json --version` keeps the current plain-text version output.
+
 ### Force output format
 
 ```bash
@@ -114,6 +128,7 @@ Timeout behavior:
 music-importer import <input_dir> <output_root> [options]
 
 Options:
+  --json                         Emit machine-readable JSON output for commands
   --dry-run, -n              Show plan without executing
   --format, -f TEXT          Output format: alac, aac, or auto (default: auto)
   --interactive, -i          Interactively select MusicBrainz match

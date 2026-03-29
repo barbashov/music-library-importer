@@ -1,3 +1,5 @@
+import json
+import subprocess
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -23,12 +25,30 @@ class TestCli:
         assert result.exit_code == 0
         assert "0.1.0" in result.output
 
+    def test_json_version_remains_plain_text(self):
+        result = runner.invoke(app, ["--json", "--version"])
+        assert result.exit_code == 0
+        assert "music-importer 0.1.0" in result.output
+        assert "{" not in result.output
+
     def test_import_help_includes_debug(self):
         result = runner.invoke(app, ["import", "--help"])
         assert result.exit_code == 0
         output = result.output.lower()
         assert "debug logging for troubleshooting" in output
         assert "http timeout in seconds for musicbrainz" in output
+
+    def test_json_help_remains_help_text(self):
+        result = runner.invoke(app, ["--json", "--help"])
+        assert result.exit_code == 0
+        assert "Usage:" in result.output
+        assert '"ok"' not in result.output
+
+    def test_json_import_help_remains_help_text(self):
+        result = runner.invoke(app, ["--json", "import", "--help"])
+        assert result.exit_code == 0
+        assert "Usage:" in result.output
+        assert '"ok"' not in result.output
 
     def test_import_nonexistent_dir(self):
         result = runner.invoke(app, ["import", "/nonexistent/dir", "/tmp/output"])
@@ -53,6 +73,26 @@ class TestCli:
             assert result.exit_code == 1
             assert "Invalid format" in result.output
 
+    def test_json_invalid_format(self, tmp_path):
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        with patch("music_importer.cli.check_external_tools", return_value=[]):
+            result = runner.invoke(
+                app,
+                [
+                    "--json",
+                    "import",
+                    str(input_dir),
+                    str(tmp_path / "output"),
+                    "--format",
+                    "invalid",
+                ],
+            )
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "invalid_format"
+
     @patch("music_importer.cli.check_external_tools", return_value=[])
     @patch("music_importer.cli.MusicBrainzClient")
     def test_dry_run_no_files(self, mock_mb, mock_tools, tmp_path):
@@ -72,6 +112,29 @@ class TestCli:
         )
         assert result.exit_code == 1
         assert "No audio files" in result.output
+
+    @patch("music_importer.cli.check_external_tools", return_value=[])
+    def test_json_no_audio_files_error(self, mock_tools, tmp_path):
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "readme.txt").touch()
+
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "import",
+                str(input_dir),
+                str(tmp_path / "output"),
+                "--dry-run",
+                "--no-tags",
+            ],
+        )
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "no_audio_files"
+        assert payload["summary"]["tracks_total"] == 0
 
     @patch("music_importer.cli.check_external_tools", return_value=[])
     def test_global_debug_flag_is_accepted(self, mock_tools, tmp_path):
@@ -114,6 +177,25 @@ class TestCli:
         assert result.exit_code == 1
         assert "--http-timeout must be greater than 0" in result.output
 
+    def test_json_interactive_rejected(self, tmp_path):
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "import",
+                str(input_dir),
+                str(tmp_path / "output"),
+                "--interactive",
+            ],
+        )
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "interactive_not_supported_in_json"
+
     @patch("music_importer.cli.check_external_tools", return_value=[])
     @patch("music_importer.cli.MusicBrainzClient")
     def test_dry_run_with_files(self, mock_mb_cls, mock_tools, tmp_path):
@@ -140,6 +222,67 @@ class TestCli:
         assert result.exit_code == 0
         assert "Album" in result.output
         assert "Conversion Plan" in result.output
+
+    @patch("music_importer.cli.check_external_tools", return_value=[])
+    def test_json_dry_run_with_files(self, mock_tools, tmp_path):
+        input_dir = tmp_path / "Artist" / "Album"
+        input_dir.mkdir(parents=True)
+        (input_dir / "01.flac").touch()
+        (input_dir / "02.flac").touch()
+
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "import",
+                str(input_dir),
+                str(tmp_path / "output"),
+                "--dry-run",
+                "--no-tags",
+                "--format",
+                "alac",
+            ],
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["ok"] is True
+        assert payload["mode"] == "dry-run"
+        assert payload["summary"]["tracks_total"] == 2
+        assert len(payload["tracks"]) == 2
+
+    @patch("music_importer.cli.check_external_tools", return_value=[])
+    @patch("music_importer.cli.execute_plan")
+    def test_json_execute_success(self, mock_execute_plan, mock_tools, tmp_path):
+        input_dir = tmp_path / "Artist" / "Album"
+        input_dir.mkdir(parents=True)
+        (input_dir / "01.flac").touch()
+        (input_dir / "02.flac").touch()
+
+        def _fake_execute(plan, on_progress=None):
+            if on_progress:
+                on_progress(0, len(plan.tasks), plan.tasks[0])
+                on_progress(1, len(plan.tasks), plan.tasks[1])
+
+        mock_execute_plan.side_effect = _fake_execute
+
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "import",
+                str(input_dir),
+                str(tmp_path / "output"),
+                "--no-tags",
+                "--format",
+                "alac",
+            ],
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["ok"] is True
+        assert payload["mode"] == "execute"
+        assert payload["summary"]["tracks_total"] == 2
+        assert payload["summary"]["tracks_completed"] == 2
 
     @patch("music_importer.cli.check_external_tools", return_value=[])
     @patch("music_importer.cli.MusicBrainzClient")
@@ -188,6 +331,48 @@ class TestCli:
         )
         assert result.exit_code == 1
         assert "already exists" in result.output
+
+    @patch("music_importer.cli.check_external_tools", return_value=[])
+    @patch("music_importer.cli.execute_plan")
+    def test_json_execute_failure_reports_partial_progress(
+        self, mock_execute_plan, mock_tools, tmp_path
+    ):
+        input_dir = tmp_path / "Artist" / "Album"
+        input_dir.mkdir(parents=True)
+        (input_dir / "01.flac").touch()
+        (input_dir / "02.flac").touch()
+
+        def _fake_execute(plan, on_progress=None):
+            if on_progress:
+                on_progress(0, len(plan.tasks), plan.tasks[0])
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=["ffmpeg", "-i", "broken.flac"],
+                output="stdout text",
+                stderr="stderr text",
+            )
+
+        mock_execute_plan.side_effect = _fake_execute
+
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "import",
+                str(input_dir),
+                str(tmp_path / "output"),
+                "--no-tags",
+                "--format",
+                "alac",
+            ],
+        )
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["error"]["code"] == "conversion_failed"
+        assert payload["summary"]["tracks_total"] == 2
+        assert payload["summary"]["tracks_completed"] == 1
+        assert payload["error"]["details"]["failed_track"]["index"] == 2
 
     def test_lookup_attempt_order_and_dedup(self):
         assert _build_lookup_attempts("A", "B", "C") == [("A", "B"), ("C", "B"), (None, "B")]
