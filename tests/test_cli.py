@@ -13,6 +13,7 @@ from music_importer.cli import (
 )
 
 runner = CliRunner()
+_ANSI_ESCAPE = __import__("re").compile(r"\x1b\[[0-9;]*m")
 
 
 class TestCli:
@@ -35,7 +36,7 @@ class TestCli:
     def test_import_help_includes_debug(self):
         result = runner.invoke(app, ["import", "--help"])
         assert result.exit_code == 0
-        output = result.output.lower()
+        output = _ANSI_ESCAPE.sub("", result.output).lower()
         assert "--debug" in output
         assert "troubleshooting" in output
         assert "--http-timeout" in output
