@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import subprocess
+import sys
 import threading
 from collections import Counter
 from pathlib import Path
@@ -492,45 +493,66 @@ def import_album(
         )
         return
 
-    import sys as _sys
-
     _prog_console = Console(stderr=True, highlight=False)
     logger.debug(
         "Progress console: stderr.isatty=%s is_terminal=%s is_interactive=%s quiet=%s",
-        _sys.stderr.isatty(),
+        sys.stderr.isatty(),
         _prog_console.is_terminal,
         _prog_console.is_interactive,
         quiet,
     )
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeRemainingColumn(),
-        console=_prog_console,
-        disable=quiet,
-    ) as progress:
-        task_id = progress.add_task("Preparing...", total=len(plan.tasks))
-        _completed = 0
-        _lock = threading.Lock()
 
-        def on_track_start(idx: int, total: int, task: object) -> None:
-            if jobs == 1:
+    if _prog_console.is_interactive:
+        # Interactive TTY: live Rich progress bar.
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeRemainingColumn(),
+            console=_prog_console,
+            disable=quiet,
+        ) as progress:
+            task_id = progress.add_task("Preparing...", total=len(plan.tasks))
+            _completed = 0
+            _lock = threading.Lock()
+
+            def on_track_start(idx: int, total: int, task: object) -> None:
+                if jobs == 1:
+                    title = (
+                        getattr(task, "tags", {}).get("title", "")
+                        or getattr(task, "destination", Path()).stem
+                    )
+                    progress.update(task_id, description=f"Encoding {idx + 1}/{total}: {title}")
+
+            def on_progress(idx: int, total: int, task: object) -> None:
+                nonlocal _completed
+                with _lock:
+                    _completed += 1
+                    done = _completed
+                progress.advance(task_id)
+                if jobs > 1:
+                    progress.update(task_id, description=f"Encoding... ({done}/{total} done)")
+
+            execute_plan(
+                plan,
+                on_progress=on_progress,
+                on_track_start=on_track_start,
+                overwrite=overwrite,
+                jobs=jobs,
+            )
+    else:
+        # Non-interactive (e.g. Docker without -t): print one line per track.
+        def on_track_start(idx: int, total: int, task: object) -> None:  # type: ignore[misc]
+            if not quiet:
                 title = (
                     getattr(task, "tags", {}).get("title", "")
                     or getattr(task, "destination", Path()).stem
                 )
-                progress.update(task_id, description=f"Encoding {idx + 1}/{total}: {title}")
+                console.print(f"[dim][{idx + 1}/{total}][/dim] {title}")
 
-        def on_progress(idx: int, total: int, task: object) -> None:
-            nonlocal _completed
-            with _lock:
-                _completed += 1
-                done = _completed
-            progress.advance(task_id)
-            if jobs > 1:
-                progress.update(task_id, description=f"Encoding... ({done}/{total} done)")
+        def on_progress(idx: int, total: int, task: object) -> None:  # type: ignore[misc]
+            pass
 
         execute_plan(
             plan,
