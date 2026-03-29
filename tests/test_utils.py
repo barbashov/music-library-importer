@@ -9,6 +9,9 @@ from music_importer.utils import (
     find_cue_files,
     has_audio_subdirs,
     infer_artist_album,
+    is_generic_dir_name,
+    is_placeholder_value,
+    normalize_metadata_value,
     sanitize_filename,
 )
 
@@ -71,6 +74,21 @@ class TestInferArtistAlbum:
     def test_nested_artist_album(self):
         path = Path("/home/user/library/Radiohead/OK Computer")
         assert infer_artist_album(path) == ("Radiohead", "OK Computer")
+
+
+class TestMetadataValueHelpers:
+    def test_normalize_metadata_value(self):
+        assert normalize_metadata_value("  A   B  ") == "A B"
+
+    def test_placeholder_value_detection(self):
+        assert is_placeholder_value("Unknown Artist")
+        assert is_placeholder_value(" n/a ")
+        assert not is_placeholder_value("The Beatles")
+
+    def test_generic_dir_name_detection(self):
+        assert is_generic_dir_name("input")
+        assert is_generic_dir_name(" Music ")
+        assert not is_generic_dir_name("Beatles")
 
 
 class TestCheckExternalTools:

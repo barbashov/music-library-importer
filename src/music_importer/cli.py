@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from collections import Counter
 from pathlib import Path
 
 import typer
@@ -22,6 +24,9 @@ from music_importer.utils import (
     find_audio_files,
     has_audio_subdirs,
     infer_artist_album,
+    is_generic_dir_name,
+    is_placeholder_value,
+    normalize_metadata_value,
     sanitize_filename,
 )
 
@@ -33,6 +38,8 @@ app = typer.Typer(
 )
 console = Console()
 logger = logging.getLogger(__name__)
+_MAX_PROBE_FILES = 30
+_FILENAME_TRACK_PREFIX_RE = re.compile(r"^\s*\d{1,2}(?:[-_. ]+\d{1,2})?\s*[-_. ]+\s*")
 
 
 def version_callback(value: bool) -> None:
@@ -141,24 +148,16 @@ def import_album(
         )
         raise typer.Exit(1)
 
-    # Infer artist and album
-    artist_guess, album_guess = infer_artist_album(input_dir)
+    # Infer metadata candidates from directory, source tags, and filenames.
+    dir_artist_guess, dir_album_guess = infer_artist_album(input_dir)
+    probe_files = _collect_probe_audio_files(input_dir, _MAX_PROBE_FILES)
+    tag_artist_guess, tag_album_guess = _guess_from_source_tags(probe_files)
+    filename_artist_guess = _guess_artist_from_filenames(probe_files)
 
-    # Try source tags for better initial guess
-    audio_files = find_audio_files(input_dir)
-    if not audio_files:
-        subdirs = has_audio_subdirs(input_dir)
-        if subdirs:
-            audio_files = find_audio_files(subdirs[0])
-
-    if audio_files:
-        src_tags = read_source_tags(audio_files[0])
-        if src_tags["album"]:
-            album_guess = src_tags["album"]
-        if src_tags["albumartist"]:
-            artist_guess = src_tags["albumartist"]
-        elif src_tags["artist"]:
-            artist_guess = src_tags["artist"]
+    artist_guess = _normalize_artist_guess(tag_artist_guess) or _normalize_artist_guess(
+        dir_artist_guess
+    )
+    album_guess = _normalize_album_guess(tag_album_guess) or _normalize_album_guess(dir_album_guess)
 
     # MusicBrainz lookup
     release_info = None
@@ -170,24 +169,46 @@ def import_album(
             http_timeout=http_timeout,
         )
 
-        if not quiet:
-            console.print(f"[dim]Searching MusicBrainz:[/dim] {artist_guess} — {album_guess}")
-
-        if interactive:
-            release_info = _interactive_mb_search(mb_client, artist_guess, album_guess, quiet)
+        if not album_guess:
+            if not quiet:
+                console.print(
+                    "[yellow]Skipping MusicBrainz:[/yellow] insufficient album metadata for lookup."
+                )
         else:
-            release = mb_client.search_release(artist_guess, album_guess)
-            if release:
-                release_id = release["id"]
-                if not quiet:
-                    console.print(
-                        f"[green]Found:[/green] {release.get('title')} "
-                        f"[dim](id: {release_id})[/dim]"
+            attempts = _build_lookup_attempts(artist_guess, album_guess, filename_artist_guess)
+            if interactive:
+                for query_artist, query_album in attempts:
+                    if not quiet:
+                        console.print(
+                            f"[dim]Searching MusicBrainz:[/dim] "
+                            f"{_format_lookup_query(query_artist, query_album)}"
+                        )
+                    release_info = _interactive_mb_search(
+                        mb_client, query_artist, query_album, quiet
                     )
-                release_info = mb_client.get_release_details(release_id)
+                    if release_info:
+                        break
             else:
-                if not quiet:
-                    console.print("[yellow]No MusicBrainz match found.[/yellow]")
+                for query_artist, query_album in attempts:
+                    if not quiet:
+                        console.print(
+                            f"[dim]Searching MusicBrainz:[/dim] "
+                            f"{_format_lookup_query(query_artist, query_album)}"
+                        )
+                    release = mb_client.search_release(query_artist, query_album)
+                    if not release:
+                        continue
+                    release_id = release["id"]
+                    if not quiet:
+                        console.print(
+                            f"[green]Found:[/green] {release.get('title')} "
+                            f"[dim](id: {release_id})[/dim]"
+                        )
+                    release_info = mb_client.get_release_details(release_id)
+                    break
+
+            if not release_info and not quiet:
+                console.print("[yellow]No MusicBrainz match found.[/yellow]")
 
         if release_info and not no_artwork:
             cover_data = mb_client.get_cover_art(
@@ -205,13 +226,13 @@ def import_album(
         year = release_info.year
         genre = release_info.genre
     else:
-        album_title = album_guess
-        album_artist = artist_guess
+        album_title = album_guess or "Unknown Album"
+        album_artist = artist_guess or filename_artist_guess or "Unknown Artist"
         year = ""
         genre = ""
         # Try to get year from source tags
-        if audio_files:
-            src_tags = read_source_tags(audio_files[0])
+        if probe_files:
+            src_tags = read_source_tags(probe_files[0])
             if src_tags["date"]:
                 year = src_tags["date"][:4]
             if src_tags["genre"]:
@@ -297,8 +318,100 @@ def import_album(
         )
 
 
+def _normalize_artist_guess(value: str | None) -> str | None:
+    normalized = normalize_metadata_value(value)
+    if not normalized or is_placeholder_value(normalized) or is_generic_dir_name(normalized):
+        return None
+    return normalized
+
+
+def _normalize_album_guess(value: str | None) -> str | None:
+    normalized = normalize_metadata_value(value)
+    if not normalized or is_placeholder_value(normalized) or is_generic_dir_name(normalized):
+        return None
+    return normalized
+
+
+def _collect_probe_audio_files(input_dir: Path, limit: int) -> list[Path]:
+    files: list[Path] = []
+    files.extend(find_audio_files(input_dir))
+    if len(files) >= limit:
+        return files[:limit]
+
+    for subdir in has_audio_subdirs(input_dir):
+        files.extend(find_audio_files(subdir))
+        if len(files) >= limit:
+            break
+    return files[:limit]
+
+
+def _guess_from_source_tags(probe_files: list[Path]) -> tuple[str | None, str | None]:
+    artist_counts: Counter[str] = Counter()
+    album_counts: Counter[str] = Counter()
+
+    for file_path in probe_files:
+        tags = read_source_tags(file_path)
+        album_guess = _normalize_album_guess(tags.get("album"))
+        if album_guess:
+            album_counts[album_guess] += 1
+
+        albumartist_guess = _normalize_artist_guess(tags.get("albumartist"))
+        artist_guess = albumartist_guess or _normalize_artist_guess(tags.get("artist"))
+        if artist_guess:
+            artist_counts[artist_guess] += 1
+
+    top_artist = artist_counts.most_common(1)[0][0] if artist_counts else None
+    top_album = album_counts.most_common(1)[0][0] if album_counts else None
+    return top_artist, top_album
+
+
+def _guess_artist_from_filenames(probe_files: list[Path]) -> str | None:
+    artist_counts: Counter[str] = Counter()
+    parsed = 0
+
+    for file_path in probe_files:
+        stem = _FILENAME_TRACK_PREFIX_RE.sub("", file_path.stem).strip()
+        if " - " not in stem:
+            continue
+        parsed += 1
+        candidate = _normalize_artist_guess(stem.split(" - ", 1)[0])
+        if candidate:
+            artist_counts[candidate] += 1
+
+    if not artist_counts or parsed == 0:
+        return None
+    top_artist, top_count = artist_counts.most_common(1)[0]
+    if top_count >= 2 and (top_count / parsed) >= 0.6:
+        return top_artist
+    return None
+
+
+def _build_lookup_attempts(
+    artist_guess: str | None, album_guess: str, filename_artist_guess: str | None
+) -> list[tuple[str | None, str]]:
+    attempts: list[tuple[str | None, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_attempt(artist: str | None, album: str) -> None:
+        key = ((artist or "").casefold(), album.casefold())
+        if key in seen:
+            return
+        seen.add(key)
+        attempts.append((artist, album))
+
+    add_attempt(artist_guess, album_guess)
+    if filename_artist_guess:
+        add_attempt(filename_artist_guess, album_guess)
+    add_attempt(None, album_guess)
+    return attempts
+
+
+def _format_lookup_query(artist: str | None, album: str) -> str:
+    return f"{artist or 'Any Artist'} — {album}"
+
+
 def _interactive_mb_search(
-    mb_client: MusicBrainzClient, artist: str, album: str, quiet: bool
+    mb_client: MusicBrainzClient, artist: str | None, album: str, quiet: bool
 ) -> ReleaseInfo | None:
     """Show top MB results and let user pick."""
     releases = mb_client.search_releases(artist, album, limit=5)

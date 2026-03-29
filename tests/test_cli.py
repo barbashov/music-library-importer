@@ -2,7 +2,12 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from music_importer.cli import app
+from music_importer.cli import (
+    _build_lookup_attempts,
+    _guess_artist_from_filenames,
+    _normalize_album_guess,
+    app,
+)
 
 runner = CliRunner()
 
@@ -183,3 +188,53 @@ class TestCli:
         )
         assert result.exit_code == 1
         assert "already exists" in result.output
+
+    def test_lookup_attempt_order_and_dedup(self):
+        assert _build_lookup_attempts("A", "B", "C") == [("A", "B"), ("C", "B"), (None, "B")]
+        assert _build_lookup_attempts("A", "B", "A") == [("A", "B"), (None, "B")]
+
+    def test_normalize_album_guess_rejects_generic_name(self):
+        assert _normalize_album_guess("input") is None
+        assert _normalize_album_guess("Real Album") == "Real Album"
+
+    def test_guess_artist_from_filenames_uses_consensus(self, tmp_path):
+        files = [
+            tmp_path / "01 - The Beatles - Come Together.flac",
+            tmp_path / "02 - The Beatles - Something.flac",
+            tmp_path / "03 - The Beatles - Oh! Darling.flac",
+        ]
+        for file_path in files:
+            file_path.touch()
+        assert _guess_artist_from_filenames(files) == "The Beatles"
+
+    @patch("music_importer.cli.read_source_tags")
+    @patch("music_importer.cli.check_external_tools", return_value=[])
+    @patch("music_importer.cli.MusicBrainzClient")
+    def test_skips_musicbrainz_when_album_guess_is_not_meaningful(
+        self, mock_mb_cls, _mock_tools, mock_read_tags, tmp_path
+    ):
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "01.flac").touch()
+        mock_read_tags.return_value = {
+            "title": "",
+            "artist": "Unknown Artist",
+            "album": "Unknown Album",
+            "albumartist": "",
+            "date": "",
+            "genre": "",
+            "track": 0,
+            "total_tracks": 0,
+            "disc": 0,
+            "total_discs": 0,
+        }
+
+        result = runner.invoke(
+            app, ["import", str(input_dir), str(tmp_path / "output"), "--dry-run"]
+        )
+
+        assert result.exit_code == 0
+        assert "Skipping MusicBrainz" in result.output
+        mock_mb = mock_mb_cls.return_value
+        assert mock_mb.search_release.call_count == 0
+        assert mock_mb.search_releases.call_count == 0

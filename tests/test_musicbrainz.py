@@ -206,6 +206,30 @@ class TestMusicBrainzClient:
         results = client.search_releases("The Beatles", "Abbey Road")
         assert len(results) == 2
 
+    def test_search_releases_without_artist_omits_artist_param(self, mock_mb):
+        mock_mb.search_releases.return_value = {"release-list": []}
+        client = self._make_client(mock_mb)
+
+        client.search_releases(None, "Abbey Road")
+
+        kwargs = mock_mb.search_releases.call_args.kwargs
+        assert kwargs.get("release") == "Abbey Road"
+        assert kwargs.get("limit") == 5
+        assert "artist" not in kwargs
+
+    def test_timeout_error_prints_concise_message(self, mock_mb):
+        console = MagicMock()
+        mock_mb.WebServiceError = Exception
+        mock_mb.search_releases.side_effect = Exception("operation timed out")
+        client = MusicBrainzClient(console=console, http_timeout=7.0)
+
+        results = client.search_releases("A", "B")
+
+        assert results == []
+        rendered = " ".join(str(call.args[0]) for call in console.print.call_args_list)
+        assert "MusicBrainz timeout" in rendered
+        assert "Traceback" not in rendered
+
     def test_rate_limiting(self, mock_mb):
         """Verify that consecutive calls enforce rate limiting."""
         mock_mb.search_releases.return_value = {"release-list": []}

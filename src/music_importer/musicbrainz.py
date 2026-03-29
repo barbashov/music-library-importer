@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import socket
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,6 +21,37 @@ from music_importer.debug import preview_object, summarize_binary, truncate_text
 from music_importer.models import ReleaseInfo, TrackInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        cause = getattr(current, "cause", None)
+        if isinstance(cause, BaseException) and id(cause) not in seen:
+            current = cause
+            continue
+        next_exc = current.__cause__ or current.__context__
+        current = next_exc if isinstance(next_exc, BaseException) else None
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    for item in _iter_exception_chain(exc):
+        if isinstance(item, (TimeoutError, socket.timeout)):
+            return True
+        if "timed out" in str(item).lower():
+            return True
+    return False
+
+
+def _error_summary(exc: BaseException) -> str:
+    for item in reversed(list(_iter_exception_chain(exc))):
+        msg = str(item).strip()
+        if msg:
+            return f"{item.__class__.__name__}: {msg}"
+    return exc.__class__.__name__
 
 
 class MusicBrainzClient:
@@ -60,7 +92,7 @@ class MusicBrainzClient:
             time.sleep(MB_RATE_LIMIT_SECONDS - elapsed)
         self._last_request = time.monotonic()
 
-    def search_releases(self, artist: str, album: str, limit: int = 5) -> list[dict]:
+    def search_releases(self, artist: str | None, album: str, limit: int = 5) -> list[dict]:
         """Search MB for releases, return list of matches."""
         self._rate_limit()
         logger.debug(
@@ -72,7 +104,10 @@ class MusicBrainzClient:
         )
         try:
             with self._mb_timeout_context():
-                result = mb.search_releases(artist=artist, release=album, limit=limit)
+                params: dict[str, str | int] = {"release": album, "limit": limit}
+                if artist:
+                    params["artist"] = artist
+                result = mb.search_releases(**params)
             releases: list[dict] = result.get("release-list", [])
             logger.debug(
                 "MusicBrainz search_releases response count=%d payload=%s",
@@ -81,12 +116,25 @@ class MusicBrainzClient:
             )
             return releases
         except mb.WebServiceError as e:
-            logger.debug("MusicBrainz search_releases failed", exc_info=True)
+            summary = _error_summary(e)
+            timeout = _is_timeout_error(e)
+            logger.debug(
+                "MusicBrainz search_releases failed timeout=%s detail=%s",
+                timeout,
+                summary,
+            )
             if self._console:
-                self._console.print(f"[red]MusicBrainz search error:[/red] {e}")
+                if timeout:
+                    self._console.print(
+                        "[yellow]MusicBrainz timeout:[/yellow] "
+                        f"search exceeded {self._http_timeout:.1f}s. "
+                        "Continuing without MusicBrainz metadata."
+                    )
+                else:
+                    self._console.print(f"[red]MusicBrainz search error:[/red] {summary}")
             return []
 
-    def search_release(self, artist: str, album: str) -> dict | None:
+    def search_release(self, artist: str | None, album: str) -> dict | None:
         """Search MB for a release, return best match or None."""
         releases = self.search_releases(artist, album)
         if not releases:
@@ -119,9 +167,23 @@ class MusicBrainzClient:
             if not release:
                 return None
         except mb.WebServiceError as e:
-            logger.debug("MusicBrainz get_release_by_id failed", exc_info=True)
+            summary = _error_summary(e)
+            timeout = _is_timeout_error(e)
+            logger.debug(
+                "MusicBrainz get_release_by_id failed timeout=%s release_id=%s detail=%s",
+                timeout,
+                release_id,
+                summary,
+            )
             if self._console:
-                self._console.print(f"[red]MusicBrainz fetch error:[/red] {e}")
+                if timeout:
+                    self._console.print(
+                        "[yellow]MusicBrainz timeout:[/yellow] "
+                        f"fetch exceeded {self._http_timeout:.1f}s. "
+                        "Continuing without MusicBrainz metadata."
+                    )
+                else:
+                    self._console.print(f"[red]MusicBrainz fetch error:[/red] {summary}")
             return None
 
         # Extract release-group ID for cover art fallback
@@ -192,8 +254,14 @@ class MusicBrainzClient:
                         truncate_text(data.decode(errors="replace")),
                     )
                 return data
-        except Exception:
-            logger.debug("Cover art fetch failed url=%s", url, exc_info=True)
+        except Exception as exc:
+            timeout = isinstance(exc, urllib.error.URLError) and _is_timeout_error(exc)
+            logger.debug(
+                "Cover art fetch failed url=%s timeout=%s detail=%s",
+                url,
+                timeout or _is_timeout_error(exc),
+                _error_summary(exc),
+            )
             return None
 
     def _build_track_map(self, release: dict) -> dict[int, TrackInfo]:

@@ -60,7 +60,7 @@ uv run music-importer import /path/to/album /path/to/music/library
 
 This will:
 1. Detect the artist and album from directory structure / file tags
-2. Look up the album on MusicBrainz
+2. Look up the album on MusicBrainz (see "How MusicBrainz matching works" below)
 3. Convert all tracks to ALAC (lossless) or AAC (lossy input)
 4. Tag tracks with MusicBrainz metadata and cover art
 5. Save to `library/Artist/Album/` directory
@@ -88,6 +88,25 @@ uv run music-importer import --interactive /path/to/album /path/to/library
 ```
 
 Shows top 5 MusicBrainz matches in a table and lets you pick the correct one.
+
+### How MusicBrainz matching works
+
+Matching is best-effort and uses multiple hints from your input files.
+
+1. Start with directory hints (`Artist/Album` or `Artist - Album`).
+2. Read source tags across multiple files and choose consensus `albumartist`/`artist` and `album`.
+3. Treat placeholder values (`Unknown Artist`, `Unknown Album`, `n/a`, `none`, etc.) as missing.
+4. Ignore generic mount/root directory names (`input`, `output`, `tmp`, `music`, `downloads`, etc.) for matching.
+5. If tags are poor, try filename artist hints from patterns like `Artist - Track`.
+6. Query MusicBrainz using the best `artist + album`.
+7. If needed, retry with filename-derived artist.
+8. Retry with album-only lookup when artist is still unknown.
+9. In non-interactive mode, if multiple matches exist, the top result is selected.
+10. If no match is found, import continues with source-tag/filename fallback metadata.
+
+Timeout behavior:
+- Timeouts are shown as concise warnings (no traceback output).
+- `--http-timeout` applies to both MusicBrainz and cover art requests.
 
 ### All options
 

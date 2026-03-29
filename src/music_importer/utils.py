@@ -7,6 +7,27 @@ from pathlib import Path
 from music_importer.config import ALL_AUDIO_EXTS, UNSAFE_FILENAME_CHARS
 
 _DISC_PATTERN = re.compile(r"^(cd|disc|disk|d)\s*(\d+)$", re.IGNORECASE)
+_GENERIC_DIR_NAMES = {
+    "",
+    "albums",
+    "downloads",
+    "input",
+    "library",
+    "lossless",
+    "music",
+    "output",
+    "temp",
+    "tmp",
+}
+_PLACEHOLDER_VALUES = {
+    "",
+    "<unknown>",
+    "n/a",
+    "none",
+    "unknown",
+    "unknown album",
+    "unknown artist",
+}
 
 
 def sanitize_filename(name: str) -> str:
@@ -38,6 +59,22 @@ def check_shnsplit_available() -> bool:
     return shutil.which("shnsplit") is not None
 
 
+def normalize_metadata_value(value: str | None) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_placeholder_value(value: str | None) -> bool:
+    normalized = normalize_metadata_value(value).lower()
+    return normalized in _PLACEHOLDER_VALUES
+
+
+def is_generic_dir_name(name: str | None) -> bool:
+    normalized = normalize_metadata_value(name).lower()
+    return normalized in _GENERIC_DIR_NAMES
+
+
 def infer_artist_album(input_dir: Path) -> tuple[str, str]:
     """Infer artist and album from directory structure.
 
@@ -50,17 +87,11 @@ def infer_artist_album(input_dir: Path) -> tuple[str, str]:
     artist_dir = input_dir.parent.name
 
     # If parent looks like a root dir, try splitting folder name
-    if " - " in album_dir and artist_dir.lower() in (
-        "music",
-        "albums",
-        "lossless",
-        "downloads",
-        "",
-    ):
+    if " - " in album_dir and is_generic_dir_name(artist_dir):
         parts = album_dir.split(" - ", 1)
         return parts[0].strip(), parts[1].strip()
 
-    if artist_dir and artist_dir.lower() not in ("music", "albums", "lossless", "downloads", ""):
+    if artist_dir and not is_generic_dir_name(artist_dir):
         return artist_dir, album_dir
 
     return "Unknown Artist", album_dir
