@@ -165,10 +165,13 @@ def ffmpeg_convert_segment(
     )
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(start)]
+    # Output seeking (-ss after -i) is sample-accurate: ffmpeg decodes up to
+    # the exact start position before writing any output. Input seeking can
+    # include SEEKTABLE-granularity silence before the target timestamp.
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(src), "-ss", str(start)]
     if duration is not None:
         cmd += ["-t", str(duration)]
-    cmd += ["-i", str(src), "-map", "0:a"]
+    cmd += ["-map", "0:a"]
 
     if codec == "alac":
         cmd += ["-c:a", "alac"]
