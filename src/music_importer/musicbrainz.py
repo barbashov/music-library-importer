@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from urllib.parse import unquote, urlparse
 
 import musicbrainzngs as mb
 from rich.console import Console
@@ -21,6 +24,75 @@ from music_importer.debug import preview_object, summarize_binary, truncate_text
 from music_importer.models import ReleaseInfo, TrackInfo
 
 logger = logging.getLogger(__name__)
+_PROXY_ENV_KEYS = (
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+)
+
+try:
+    import socks
+except ImportError:
+    socks = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
+class _SocksProxyConfig:
+    proxy_type: int
+    host: str
+    port: int
+    username: str | None
+    password: str | None
+    rdns: bool
+    scheme: str
+    source_env: str
+
+
+def _get_https_proxy_from_env() -> tuple[str | None, str | None]:
+    for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        value = os.environ.get(key)
+        if value:
+            return value, key
+    return None, None
+
+
+def _parse_socks_proxy(proxy_url: str, source_env: str) -> _SocksProxyConfig | None:
+    parsed = urlparse(proxy_url)
+    scheme = parsed.scheme.lower()
+    if not scheme.startswith("socks"):
+        return None
+    if socks is None:
+        raise ValueError("PySocks is not installed.")
+
+    scheme_map = {
+        "socks5": (socks.SOCKS5, False),
+        "socks5h": (socks.SOCKS5, True),
+        "socks4": (socks.SOCKS4, False),
+        "socks4a": (socks.SOCKS4, True),
+    }
+    if scheme not in scheme_map:
+        raise ValueError(
+            f"unsupported SOCKS scheme '{scheme}'. Use socks5, socks5h, socks4, or socks4a."
+        )
+    if not parsed.hostname:
+        raise ValueError("missing proxy host")
+    if parsed.port is None:
+        raise ValueError("missing proxy port")
+
+    proxy_type, rdns = scheme_map[scheme]
+    return _SocksProxyConfig(
+        proxy_type=proxy_type,
+        host=parsed.hostname,
+        port=parsed.port,
+        username=unquote(parsed.username) if parsed.username else None,
+        password=unquote(parsed.password) if parsed.password else None,
+        rdns=rdns,
+        scheme=scheme,
+        source_env=source_env,
+    )
 
 
 def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
@@ -54,6 +126,35 @@ def _error_summary(exc: BaseException) -> str:
     return exc.__class__.__name__
 
 
+@contextmanager
+def _socks_proxy_context(config: _SocksProxyConfig) -> Iterator[None]:
+    if socks is None:
+        raise RuntimeError("PySocks is not installed.")
+    original_socket = socket.socket
+    previous_env = {key: os.environ.get(key) for key in _PROXY_ENV_KEYS}
+    try:
+        for key in _PROXY_ENV_KEYS:
+            os.environ.pop(key, None)
+        socks.setdefaultproxy(
+            config.proxy_type,
+            config.host,
+            config.port,
+            rdns=config.rdns,
+            username=config.username,
+            password=config.password,
+        )
+        socket.socket = socks.socksocket  # type: ignore[misc]
+        yield
+    finally:
+        socket.socket = original_socket  # type: ignore[misc]
+        socks.setdefaultproxy()
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 class MusicBrainzClient:
     def __init__(self, console: Console | None = None, http_timeout: float = 15.0):
         email = MB_CONTACT_EMAIL
@@ -74,6 +175,44 @@ class MusicBrainzClient:
         self._last_request: float = 0.0
         self._console = console
         self._http_timeout = http_timeout
+        self._socks_proxy = self._resolve_socks_proxy()
+
+    def _resolve_socks_proxy(self) -> _SocksProxyConfig | None:
+        proxy_url, source_env = _get_https_proxy_from_env()
+        if not proxy_url or not source_env:
+            logger.debug("MusicBrainz proxy mode=direct")
+            return None
+        try:
+            config = _parse_socks_proxy(proxy_url, source_env)
+        except ValueError as exc:
+            logger.warning("Ignoring SOCKS proxy config from %s: %s", source_env, exc)
+            if self._console:
+                self._console.print(f"[yellow]Proxy warning:[/yellow] ignoring {source_env}: {exc}")
+            return None
+        if config is None:
+            logger.debug(
+                "MusicBrainz proxy mode=urllib source=%s scheme=%s",
+                source_env,
+                urlparse(proxy_url).scheme.lower() or "unknown",
+            )
+            return None
+        logger.debug(
+            "MusicBrainz proxy mode=socks source=%s scheme=%s host=%s port=%d rdns=%s",
+            config.source_env,
+            config.scheme,
+            config.host,
+            config.port,
+            config.rdns,
+        )
+        return config
+
+    @contextmanager
+    def _network_context(self) -> Iterator[None]:
+        if self._socks_proxy is None:
+            yield
+            return
+        with _socks_proxy_context(self._socks_proxy):
+            yield
 
     @contextmanager
     def _mb_timeout_context(self) -> Iterator[None]:
@@ -103,7 +242,7 @@ class MusicBrainzClient:
             self._http_timeout,
         )
         try:
-            with self._mb_timeout_context():
+            with self._network_context(), self._mb_timeout_context():
                 params: dict[str, str | int] = {"release": album, "limit": limit}
                 if artist:
                     params["artist"] = artist
@@ -154,7 +293,7 @@ class MusicBrainzClient:
             self._http_timeout,
         )
         try:
-            with self._mb_timeout_context():
+            with self._network_context(), self._mb_timeout_context():
                 result = mb.get_release_by_id(
                     release_id,
                     includes=["recordings", "artists", "labels", "release-groups", "media"],
@@ -239,7 +378,10 @@ class MusicBrainzClient:
                 url, headers={"User-Agent": f"{MB_APP_NAME}/{MB_APP_VERSION}"}
             )
             logger.debug("Cover art request timeout_seconds=%s", self._http_timeout)
-            with urllib.request.urlopen(req, timeout=self._http_timeout) as r:
+            with (
+                self._network_context(),
+                urllib.request.urlopen(req, timeout=self._http_timeout) as r,
+            ):
                 data: bytes = r.read()
                 content_type = r.headers.get("Content-Type")
                 status = getattr(r, "status", None)

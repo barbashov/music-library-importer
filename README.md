@@ -122,6 +122,12 @@ Timeout behavior:
 - Timeouts are shown as concise warnings (no traceback output).
 - `--http-timeout` applies to both MusicBrainz and cover art requests.
 
+Proxy behavior:
+- Standard `http://` and `https://` proxy URLs continue to work via Python urllib defaults.
+- SOCKS proxies are supported for MusicBrainz and cover art via `HTTPS_PROXY` or `ALL_PROXY`.
+- Supported SOCKS schemes: `socks5://`, `socks5h://`, `socks4://`, `socks4a://`.
+- Use `socks5h://` or `socks4a://` when you want DNS resolution performed by the proxy.
+
 ### All options
 
 ```
@@ -186,6 +192,7 @@ output_root/
 docker run --rm \
   -v /path/to/album:/input:ro \
   -v /path/to/music/library:/output \
+  -e HTTPS_PROXY=socks5://10.0.35.20:1080 \
   -e MUSIC_IMPORTER_EMAIL=you@example.com \
   ghcr.io/barbashov/music-library-importer:latest \
   import /input /output

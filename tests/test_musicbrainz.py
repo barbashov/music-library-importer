@@ -1,6 +1,14 @@
+import os
+import socket
 from unittest.mock import MagicMock, patch
 
-from music_importer.musicbrainz import MusicBrainzClient
+from music_importer.musicbrainz import (
+    MusicBrainzClient,
+    _get_https_proxy_from_env,
+    _parse_socks_proxy,
+    _socks_proxy_context,
+    _SocksProxyConfig,
+)
 
 SAMPLE_RELEASE_LIST = {
     "release-list": [
@@ -200,6 +208,41 @@ class TestMusicBrainzClient:
         assert mock_urlopen.call_count == 1
         assert mock_urlopen.call_args.kwargs.get("timeout") == 7.0
 
+    def test_search_releases_uses_network_context(self, mock_mb):
+        mock_mb.search_releases.return_value = {"release-list": []}
+        client = self._make_client(mock_mb)
+
+        with patch.object(client, "_network_context", wraps=client._network_context) as spy:
+            client.search_releases("A", "B")
+
+        assert spy.call_count == 1
+
+    def test_get_release_details_uses_network_context(self, mock_mb):
+        mock_mb.get_release_by_id.return_value = {
+            "release": {"id": "release-001", "medium-list": []}
+        }
+        client = self._make_client(mock_mb)
+
+        with patch.object(client, "_network_context", wraps=client._network_context) as spy:
+            client.get_release_details("release-001")
+
+        assert spy.call_count == 1
+
+    @patch("music_importer.musicbrainz.urllib.request.urlopen")
+    def test_fetch_cover_uses_network_context(self, mock_urlopen, mock_mb):
+        client = self._make_client(mock_mb)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"\x89PNG fake cover"
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.headers.get.return_value = "image/png"
+        mock_urlopen.return_value = mock_resp
+
+        with patch.object(client, "_network_context", wraps=client._network_context) as spy:
+            client.get_cover_art("release-001")
+
+        assert spy.call_count == 1
+
     def test_search_releases_returns_list(self, mock_mb):
         mock_mb.search_releases.return_value = SAMPLE_RELEASE_LIST
         client = self._make_client(mock_mb)
@@ -245,3 +288,55 @@ class TestMusicBrainzClient:
 
         # Should have waited approximately MB_RATE_LIMIT_SECONDS
         assert elapsed >= 0.8  # Allow some tolerance
+
+
+def test_get_https_proxy_from_env_prefers_https(monkeypatch):
+    monkeypatch.setenv("ALL_PROXY", "socks5://all-proxy:1111")
+    monkeypatch.setenv("HTTPS_PROXY", "socks5://https-proxy:2222")
+
+    proxy_url, source = _get_https_proxy_from_env()
+
+    assert proxy_url == "socks5://https-proxy:2222"
+    assert source == "HTTPS_PROXY"
+
+
+def test_parse_socks_proxy_socks5h():
+    parsed = _parse_socks_proxy("socks5h://user:pass@proxy.local:1080", "HTTPS_PROXY")
+
+    assert parsed is not None
+    assert parsed.host == "proxy.local"
+    assert parsed.port == 1080
+    assert parsed.username == "user"
+    assert parsed.password == "pass"
+    assert parsed.rdns is True
+    assert parsed.scheme == "socks5h"
+    assert parsed.source_env == "HTTPS_PROXY"
+
+
+def test_parse_socks_proxy_non_socks_returns_none():
+    assert _parse_socks_proxy("http://proxy.local:8080", "HTTPS_PROXY") is None
+
+
+def test_socks_proxy_context_temporarily_clears_proxy_env(monkeypatch):
+    config = _SocksProxyConfig(
+        proxy_type=1,
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        rdns=False,
+        scheme="socks5",
+        source_env="HTTPS_PROXY",
+    )
+    original_socket_type = socket.socket
+    monkeypatch.setenv("HTTPS_PROXY", "socks5://127.0.0.1:1080")
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+
+    with _socks_proxy_context(config):
+        assert os.environ.get("HTTPS_PROXY") is None
+        assert os.environ.get("ALL_PROXY") is None
+        assert socket.socket is not original_socket_type
+
+    assert os.environ.get("HTTPS_PROXY") == "socks5://127.0.0.1:1080"
+    assert os.environ.get("ALL_PROXY") == "socks5://127.0.0.1:1080"
+    assert socket.socket is original_socket_type

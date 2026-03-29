@@ -8,6 +8,7 @@ license = { text = "MIT" }
 dependencies = [
     "musicbrainzngs>=0.7.1",
     "mutagen>=1.47",
+    "PySocks>=1.7.1",
     "typer>=0.15",
     "rich>=13.0",
 ]
