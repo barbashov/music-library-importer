@@ -27,6 +27,8 @@ uv run ruff format src/ tests/
 uv run mypy
 ```
 
+**IMPORTANT: Before every commit, you MUST run all three commands above and fix any errors. Do not skip `ruff format` — CI enforces it and will fail if formatting is wrong.**
+
 ## Docker
 
 ```bash
