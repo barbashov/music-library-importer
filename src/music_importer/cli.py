@@ -492,13 +492,23 @@ def import_album(
         )
         return
 
+    import sys as _sys
+
+    _prog_console = Console(stderr=True, highlight=False)
+    logger.debug(
+        "Progress console: stderr.isatty=%s is_terminal=%s is_interactive=%s quiet=%s",
+        _sys.stderr.isatty(),
+        _prog_console.is_terminal,
+        _prog_console.is_interactive,
+        quiet,
+    )
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         TimeRemainingColumn(),
-        console=Console(stderr=True, highlight=False),
+        console=_prog_console,
         disable=quiet,
     ) as progress:
         task_id = progress.add_task("Preparing...", total=len(plan.tasks))
