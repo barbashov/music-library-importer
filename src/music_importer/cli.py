@@ -107,6 +107,11 @@ def import_album(
         "--http-timeout",
         help="HTTP timeout in seconds for MusicBrainz and cover art requests.",
     ),
+    artist_override: str | None = typer.Option(
+        None, "--artist", help="Override album artist name."
+    ),
+    album_override: str | None = typer.Option(None, "--album", help="Override album title."),
+    year_override: str | None = typer.Option(None, "--year", help="Override album year."),
     jobs: int = typer.Option(1, "--jobs", "-j", min=1, help="Number of parallel encoding jobs."),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging for troubleshooting."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
@@ -159,7 +164,7 @@ def import_album(
     logger.debug(
         "Starting import input_dir=%s output_root=%s dry_run=%s overwrite=%s format=%s "
         "interactive=%s no_artwork=%s no_tags=%s http_timeout=%s jobs=%d verbose=%s quiet=%s "
-        "debug=%s",
+        "debug=%s artist_override=%s album_override=%s year_override=%s",
         input_dir,
         output_root,
         dry_run,
@@ -173,6 +178,9 @@ def import_album(
         verbose,
         quiet,
         effective_debug,
+        artist_override,
+        album_override,
+        year_override,
     )
     if interactive and json_mode:
         exit_json_error(
@@ -239,6 +247,11 @@ def import_album(
         dir_artist_guess
     )
     album_guess = _normalize_album_guess(tag_album_guess) or _normalize_album_guess(dir_album_guess)
+
+    if artist_override:
+        artist_guess = artist_override
+    if album_override:
+        album_guess = album_override
 
     # MusicBrainz lookup
     cover_data = None
@@ -332,6 +345,13 @@ def import_album(
                 year = src_tags["date"][:4]
             if src_tags["genre"]:
                 genre = src_tags["genre"]
+
+    if artist_override:
+        album_artist = artist_override
+    if album_override:
+        album_title = album_override
+    if year_override:
+        year = year_override
 
     # Handle compilations
     if album_artist.lower() == "various artists":

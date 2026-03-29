@@ -142,6 +142,9 @@ Options:
   --dry-run, -n              Show plan without executing
   --format, -f TEXT          Output format: alac, aac, or auto (default: auto)
   --interactive, -i          Interactively select MusicBrainz match
+  --artist TEXT              Override album artist name
+  --album TEXT               Override album title
+  --year TEXT                Override album year
   --compilations-dir TEXT    Directory name for VA albums (default: Compilations)
   --no-artwork               Skip cover art embedding
   --no-tags                  Skip MusicBrainz tagging
