@@ -333,10 +333,7 @@ class TestBuildPlan:
         input_dir.mkdir()
         cue = input_dir / "album.cue"
         cue.write_text(
-            'FILE "album.flac" WAVE\n'
-            "  TRACK 01 AUDIO\n"
-            '    TITLE "Song A"\n'
-            "    INDEX 01 00:00:00\n"
+            'FILE "album.flac" WAVE\n  TRACK 01 AUDIO\n    TITLE "Song A"\n    INDEX 01 00:00:00\n'
         )
         # Individual pre-split tracks (no single album.flac)
         (input_dir / "01 - Song A.flac").touch()
