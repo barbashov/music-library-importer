@@ -22,11 +22,10 @@ Convert audio albums to ALAC/AAC and tag them automatically via MusicBrainz. Des
 
 ```bash
 sudo apt update
-sudo apt install -y ffmpeg shntool flac
+sudo apt install -y ffmpeg
 ```
 
-`ffmpeg` and `ffprobe` are required. For CUE sheet splitting, install `shntool` (provides `shnsplit`).
-For CUE + FLAC inputs, install `flac` as well (used by `shnsplit` as decoder).
+`ffmpeg` and `ffprobe` are required. CUE sheet splitting is handled directly by ffmpeg — no additional tools needed.
 
 ### Install uv (Python package manager)
 
@@ -227,7 +226,7 @@ docker run --rm \
 
 - Mount your input album as `/input` (read-only `:ro` is recommended)
 - Mount your music library root as `/output`
-- The image includes `ffmpeg`, `shntool`, and `flac` -- no system dependencies needed
+- The image includes `ffmpeg` -- no system dependencies needed
 - Multi-arch image: supports both `linux/amd64` and `linux/arm64`
 - `latest` tag always points to the most recent build from `main`
 
