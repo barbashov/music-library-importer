@@ -291,7 +291,7 @@ class TestBuildPlan:
 
         output_dir = tmp_path / "output" / "Artist" / "Album"
 
-        with pytest.raises(ValueError, match="The Album.flac"):
+        with pytest.raises(ValueError, match=r"The Album\.flac"):
             build_plan(
                 input_dir=input_dir,
                 output_dir=output_dir,
