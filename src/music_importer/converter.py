@@ -127,6 +127,7 @@ def ffmpeg_convert(src: Path, dst: Path, codec: str) -> None:
         "-hide_banner",
         "-loglevel",
         "error",
+        "-nostats",
         "-i",
         str(src),
         "-map",
@@ -172,7 +173,17 @@ def ffmpeg_convert_segment(
     # Output seeking (-ss after -i) is sample-accurate: ffmpeg decodes up to
     # the exact start position before writing any output. Input seeking can
     # include SEEKTABLE-granularity silence before the target timestamp.
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(src), "-ss", str(start)]
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
+        "-i",
+        str(src),
+        "-ss",
+        str(start),
+    ]
     if duration is not None:
         cmd += ["-t", str(duration)]
     cmd += ["-map", "0:a"]

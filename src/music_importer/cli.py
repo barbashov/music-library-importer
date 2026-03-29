@@ -498,7 +498,7 @@ def import_album(
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         TimeRemainingColumn(),
-        console=console,
+        console=Console(stderr=True, highlight=False),
         disable=quiet,
     ) as progress:
         task_id = progress.add_task("Preparing...", total=len(plan.tasks))
