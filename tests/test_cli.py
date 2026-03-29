@@ -303,7 +303,7 @@ class TestCli:
         (input_dir / "01.flac").touch()
         (input_dir / "02.flac").touch()
 
-        def _fake_execute(plan, on_progress=None):
+        def _fake_execute(plan, on_progress=None, overwrite=False):
             if on_progress:
                 on_progress(0, len(plan.tasks), plan.tasks[0])
                 on_progress(1, len(plan.tasks), plan.tasks[1])
@@ -415,9 +415,7 @@ class TestCli:
         (input_dir / "01.flac").touch()
         (input_dir / "02.flac").touch()
 
-        def _fake_execute(plan, on_progress=None):
-            plan.output_dir.mkdir(parents=True, exist_ok=True)
-            (plan.output_dir / "partial.m4a").touch()
+        def _fake_execute(plan, on_progress=None, overwrite=False):
             if on_progress:
                 on_progress(0, len(plan.tasks), plan.tasks[0])
             raise subprocess.CalledProcessError(
@@ -448,75 +446,6 @@ class TestCli:
         assert payload["summary"]["tracks_total"] == 2
         assert payload["summary"]["tracks_completed"] == 1
         assert payload["error"]["details"]["failed_track"]["index"] == 2
-        assert not (tmp_path / "output" / "Artist" / "Album").exists()
-
-    @patch("music_importer.cli.check_external_tools", return_value=[])
-    @patch("music_importer.cli.execute_plan")
-    def test_non_json_execute_failure_rolls_back_created_output(
-        self, mock_execute_plan, mock_tools, tmp_path
-    ):
-        input_dir = tmp_path / "Artist" / "Album"
-        input_dir.mkdir(parents=True)
-        (input_dir / "01.flac").touch()
-
-        def _fake_execute(plan, on_progress=None):
-            del on_progress
-            plan.output_dir.mkdir(parents=True, exist_ok=True)
-            (plan.output_dir / "partial.m4a").touch()
-            raise RuntimeError("boom")
-
-        mock_execute_plan.side_effect = _fake_execute
-
-        result = runner.invoke(
-            app,
-            [
-                "import",
-                str(input_dir),
-                str(tmp_path / "output"),
-                "--no-tags",
-                "--format",
-                "alac",
-            ],
-        )
-        assert result.exit_code == 1
-        assert not (tmp_path / "output" / "Artist" / "Album").exists()
-
-    @patch("music_importer.cli.check_external_tools", return_value=[])
-    @patch("music_importer.cli.execute_plan")
-    def test_non_json_execute_failure_keeps_preexisting_empty_artist_dir(
-        self, mock_execute_plan, mock_tools, tmp_path
-    ):
-        input_dir = tmp_path / "Artist" / "Album"
-        input_dir.mkdir(parents=True)
-        (input_dir / "01.flac").touch()
-
-        output_root = tmp_path / "output"
-        preexisting_artist_dir = output_root / "Artist"
-        preexisting_artist_dir.mkdir(parents=True)
-
-        def _fake_execute(plan, on_progress=None):
-            del on_progress
-            plan.output_dir.mkdir(parents=True, exist_ok=True)
-            (plan.output_dir / "partial.m4a").touch()
-            raise RuntimeError("boom")
-
-        mock_execute_plan.side_effect = _fake_execute
-
-        result = runner.invoke(
-            app,
-            [
-                "import",
-                str(input_dir),
-                str(output_root),
-                "--no-tags",
-                "--format",
-                "alac",
-            ],
-        )
-        assert result.exit_code == 1
-        assert preexisting_artist_dir.exists()
-        assert preexisting_artist_dir.is_dir()
-        assert not (preexisting_artist_dir / "Album").exists()
 
     def test_lookup_attempt_order_and_dedup(self):
         assert _build_lookup_attempts("A", "B", "C") == [("A", "B"), ("C", "B"), (None, "B")]

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -485,33 +488,51 @@ def _build_track_plan(
 def execute_plan(
     plan: ConversionPlan,
     on_progress: Any = None,
+    overwrite: bool = False,
 ) -> None:
-    """Execute a conversion plan.
+    """Execute a conversion plan atomically.
+
+    Writes all converted files to a temporary directory in the same parent as
+    ``plan.output_dir`` and renames it to the final destination only when every
+    track has completed successfully.  On any failure the temporary directory is
+    cleaned up and the exception is re-raised, leaving the library untouched.
 
     on_progress: callable(task_index, total, task) called after each conversion.
+    overwrite: if True, replace an existing output directory on success.
     """
     cue_files = find_cue_files(plan.input_dir)
     logger.debug(
-        "Executing plan input_dir=%s output_dir=%s tasks=%d cue_files=%d",
+        "Executing plan input_dir=%s output_dir=%s tasks=%d cue_files=%d overwrite=%s",
         plan.input_dir,
         plan.output_dir,
         len(plan.tasks),
         len(cue_files),
+        overwrite,
     )
 
-    if cue_files:
-        _execute_cue_plan(plan, cue_files, on_progress)
-    else:
-        _execute_track_plan(plan, on_progress)
+    plan.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(dir=plan.output_dir.parent, prefix=".tmp-"))
+    try:
+        if cue_files:
+            _execute_cue_plan(plan, cue_files, on_progress, temp_dir)
+        else:
+            _execute_track_plan(plan, on_progress, temp_dir)
+
+        # All tracks succeeded — atomically move to final destination.
+        if overwrite and plan.output_dir.exists():
+            shutil.rmtree(plan.output_dir)
+        os.rename(temp_dir, plan.output_dir)
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
 
 
 def _execute_cue_plan(
     plan: ConversionPlan,
     cue_files: list[Path],
     on_progress: Any,
+    work_dir: Path,
 ) -> None:
-    plan.output_dir.mkdir(parents=True, exist_ok=True)
-
     task_idx = 0
 
     for cue_file in cue_files:
@@ -532,17 +553,18 @@ def _execute_cue_plan(
             if task_idx >= len(plan.tasks):
                 break
             task = plan.tasks[task_idx]
+            actual_dst = work_dir / task.destination.name
             duration = timestamps[i + 1] - start if i + 1 < len(timestamps) else None
             logger.debug(
                 "Processing CUE track index=%d source=%s destination=%s start=%s duration=%s",
                 task_idx,
                 audio_file,
-                task.destination,
+                actual_dst,
                 start,
                 duration,
             )
-            ffmpeg_convert_segment(audio_file, task.destination, task.codec, start, duration)
-            write_tags(task.destination, task.tags, plan.cover_data)
+            ffmpeg_convert_segment(audio_file, actual_dst, task.codec, start, duration)
+            write_tags(actual_dst, task.tags, plan.cover_data)
             if on_progress:
                 on_progress(task_idx, len(plan.tasks), task)
             task_idx += 1
@@ -551,19 +573,19 @@ def _execute_cue_plan(
 def _execute_track_plan(
     plan: ConversionPlan,
     on_progress: Any,
+    work_dir: Path,
 ) -> None:
-    plan.output_dir.mkdir(parents=True, exist_ok=True)
-
     for i, task in enumerate(plan.tasks):
         if task.skipped:
             continue
+        actual_dst = work_dir / task.destination.name
         logger.debug(
             "Processing track index=%d source=%s destination=%s",
             i,
             task.source,
-            task.destination,
+            actual_dst,
         )
-        ffmpeg_convert(task.source, task.destination, task.codec)
-        write_tags(task.destination, task.tags, plan.cover_data)
+        ffmpeg_convert(task.source, actual_dst, task.codec)
+        write_tags(actual_dst, task.tags, plan.cover_data)
         if on_progress:
             on_progress(i, len(plan.tasks), task)

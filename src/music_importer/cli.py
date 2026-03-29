@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import shutil
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -87,6 +86,9 @@ def import_album(
         ..., help="Output music library root directory.", resolve_path=True
     ),
     dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show plan without executing."),
+    overwrite: bool = typer.Option(
+        False, "--overwrite", help="Overwrite existing album directory."
+    ),
     format: str = typer.Option("auto", "--format", "-f", help="Output format: alac, aac, or auto."),
     interactive: bool = typer.Option(
         False, "--interactive", "-i", help="Interactively select MusicBrainz match."
@@ -152,11 +154,12 @@ def import_album(
         logging.getLogger("music_importer").setLevel(logging.INFO)
     verbose = verbose or effective_debug
     logger.debug(
-        "Starting import input_dir=%s output_root=%s dry_run=%s format=%s interactive=%s "
-        "no_artwork=%s no_tags=%s http_timeout=%s verbose=%s quiet=%s debug=%s",
+        "Starting import input_dir=%s output_root=%s dry_run=%s overwrite=%s format=%s "
+        "interactive=%s no_artwork=%s no_tags=%s http_timeout=%s verbose=%s quiet=%s debug=%s",
         input_dir,
         output_root,
         dry_run,
+        overwrite,
         format,
         interactive,
         no_artwork,
@@ -342,7 +345,7 @@ def import_album(
     }
 
     # Check existing destination
-    if output_dir.exists() and not dry_run:
+    if output_dir.exists() and not dry_run and not overwrite:
         if json_mode:
             exit_json_error(
                 "output_conflict",
@@ -352,7 +355,7 @@ def import_album(
         console.print(
             Panel(
                 f"[red]Album directory already exists:[/red]\n{output_dir}\n\n"
-                "Remove it first or choose a different output.",
+                "Remove it first, choose a different output, or use --overwrite.",
                 title="Conflict",
                 border_style="red",
             )
@@ -390,7 +393,12 @@ def import_album(
     if dry_run:
         if json_mode:
             if output_dir.exists():
-                json_warnings.append(f"Output directory already exists: {output_dir}")
+                msg = (
+                    f"Output directory will be overwritten: {output_dir}"
+                    if overwrite
+                    else f"Output directory already exists: {output_dir}"
+                )
+                json_warnings.append(msg)
             _emit_json(
                 _build_import_result(
                     ok=True,
@@ -408,9 +416,15 @@ def import_album(
             return
         display_plan(plan, verbose)
         if output_dir.exists():
-            console.print(
-                f"\n[yellow]Warning:[/yellow] Output directory already exists: {output_dir}"
-            )
+            if overwrite:
+                console.print(
+                    f"\n[yellow]Warning:[/yellow] Output directory will be overwritten: "
+                    f"{output_dir}"
+                )
+            else:
+                console.print(
+                    f"\n[yellow]Warning:[/yellow] Output directory already exists: {output_dir}"
+                )
         return
 
     # Execute
@@ -419,7 +433,6 @@ def import_album(
 
     if output_dir is None:  # pragma: no cover - defensive
         raise RuntimeError("Output directory was not resolved before execution.")
-    preexisting_destination_dirs = _snapshot_existing_destination_dirs(output_root, output_dir)
 
     if json_mode:
 
@@ -429,13 +442,8 @@ def import_album(
             completed_tracks = idx + 1
 
         try:
-            execute_plan(plan, on_progress=on_progress)
+            execute_plan(plan, on_progress=on_progress, overwrite=overwrite)
         except subprocess.CalledProcessError as exc:
-            _rollback_failed_destination(
-                output_root=output_root,
-                output_dir=output_dir,
-                preexisting_dirs=preexisting_destination_dirs,
-            )
             failed_task = (
                 _task_to_json(plan.tasks[completed_tracks], completed_tracks + 1)
                 if completed_tracks < len(plan.tasks)
@@ -453,11 +461,6 @@ def import_album(
                 },
             )
         except Exception as exc:  # pragma: no cover - defensive safety net
-            _rollback_failed_destination(
-                output_root=output_root,
-                output_dir=output_dir,
-                preexisting_dirs=preexisting_destination_dirs,
-            )
             failed_task = (
                 _task_to_json(plan.tasks[completed_tracks], completed_tracks + 1)
                 if completed_tracks < len(plan.tasks)
@@ -501,15 +504,7 @@ def import_album(
             title = getattr(task, "tags", {}).get("title", "")
             progress.update(task_id, advance=1, description=f"Converting: {title}")
 
-        try:
-            execute_plan(plan, on_progress=on_progress)
-        except Exception:
-            _rollback_failed_destination(
-                output_root=output_root,
-                output_dir=output_dir,
-                preexisting_dirs=preexisting_destination_dirs,
-            )
-            raise
+        execute_plan(plan, on_progress=on_progress, overwrite=overwrite)
 
     if not quiet:
         console.print(
@@ -530,75 +525,6 @@ def _coerce_process_output(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return str(value)
-
-
-def _snapshot_existing_destination_dirs(output_root: Path, output_dir: Path) -> set[Path]:
-    existing: set[Path] = set()
-    if not _is_within_path(output_dir, output_root):
-        return existing
-
-    current = output_dir
-    while True:
-        if current.exists() and current.is_dir():
-            existing.add(current)
-        if current == output_root:
-            break
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-    return existing
-
-
-def _rollback_failed_destination(
-    *,
-    output_root: Path,
-    output_dir: Path | None,
-    preexisting_dirs: set[Path],
-) -> None:
-    if output_dir is None:
-        return
-    if not _is_within_path(output_dir, output_root):
-        logger.warning(
-            "Skipping rollback because output_dir=%s is outside output_root=%s",
-            output_dir,
-            output_root,
-        )
-        return
-
-    try:
-        if output_dir.exists():
-            logger.debug("Rollback removing output_dir=%s", output_dir)
-            shutil.rmtree(output_dir)
-    except OSError:
-        logger.exception("Rollback failed while deleting output_dir=%s", output_dir)
-        return
-
-    current = output_dir.parent
-    while _is_within_path(current, output_root):
-        if current in preexisting_dirs:
-            break
-        try:
-            current.rmdir()
-            logger.debug("Rollback removed empty directory=%s", current)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            break
-        if current == output_root:
-            break
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-
-
-def _is_within_path(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 def _task_to_json(task: object, index: int) -> dict[str, Any]:
