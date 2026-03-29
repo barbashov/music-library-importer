@@ -523,17 +523,13 @@ def _execute_cue_plan(
             continue
 
         timestamps = parse_cue_timestamps(cue_file)
-        logger.debug(
-            "CUE timestamps cue_file=%s count=%d", cue_file, len(timestamps)
-        )
+        logger.debug("CUE timestamps cue_file=%s count=%d", cue_file, len(timestamps))
 
         for i, start in enumerate(timestamps):
             if task_idx >= len(plan.tasks):
                 break
             task = plan.tasks[task_idx]
-            duration = (
-                timestamps[i + 1] - start if i + 1 < len(timestamps) else None
-            )
+            duration = timestamps[i + 1] - start if i + 1 < len(timestamps) else None
             logger.debug(
                 "Processing CUE track index=%d source=%s destination=%s start=%s duration=%s",
                 task_idx,
