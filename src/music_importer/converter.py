@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -488,7 +489,9 @@ def _build_track_plan(
 def execute_plan(
     plan: ConversionPlan,
     on_progress: Any = None,
+    on_track_start: Any = None,
     overwrite: bool = False,
+    jobs: int = 1,
 ) -> None:
     """Execute a conversion plan atomically.
 
@@ -498,25 +501,28 @@ def execute_plan(
     cleaned up and the exception is re-raised, leaving the library untouched.
 
     on_progress: callable(task_index, total, task) called after each conversion.
+    on_track_start: callable(task_index, total, task) called before each conversion starts.
     overwrite: if True, replace an existing output directory on success.
+    jobs: number of parallel encoding workers (default 1 = sequential).
     """
     cue_files = find_cue_files(plan.input_dir)
     logger.debug(
-        "Executing plan input_dir=%s output_dir=%s tasks=%d cue_files=%d overwrite=%s",
+        "Executing plan input_dir=%s output_dir=%s tasks=%d cue_files=%d overwrite=%s jobs=%d",
         plan.input_dir,
         plan.output_dir,
         len(plan.tasks),
         len(cue_files),
         overwrite,
+        jobs,
     )
 
     plan.output_dir.parent.mkdir(parents=True, exist_ok=True)
     temp_dir = Path(tempfile.mkdtemp(dir=plan.output_dir.parent, prefix=".tmp-"))
     try:
         if cue_files:
-            _execute_cue_plan(plan, cue_files, on_progress, temp_dir)
+            _execute_cue_plan(plan, cue_files, on_progress, on_track_start, temp_dir)
         else:
-            _execute_track_plan(plan, on_progress, temp_dir)
+            _execute_track_plan(plan, on_progress, on_track_start, temp_dir, jobs)
 
         # All tracks succeeded — atomically move to final destination.
         if overwrite and plan.output_dir.exists():
@@ -531,6 +537,7 @@ def _execute_cue_plan(
     plan: ConversionPlan,
     cue_files: list[Path],
     on_progress: Any,
+    on_track_start: Any,
     work_dir: Path,
 ) -> None:
     task_idx = 0
@@ -563,6 +570,8 @@ def _execute_cue_plan(
                 start,
                 duration,
             )
+            if on_track_start:
+                on_track_start(task_idx, len(plan.tasks), task)
             ffmpeg_convert_segment(audio_file, actual_dst, task.codec, start, duration)
             write_tags(actual_dst, task.tags, plan.cover_data)
             if on_progress:
@@ -573,11 +582,11 @@ def _execute_cue_plan(
 def _execute_track_plan(
     plan: ConversionPlan,
     on_progress: Any,
+    on_track_start: Any,
     work_dir: Path,
+    jobs: int = 1,
 ) -> None:
-    for i, task in enumerate(plan.tasks):
-        if task.skipped:
-            continue
+    def _run_one(i: int, task: ConversionTask) -> None:
         actual_dst = work_dir / task.destination.name
         logger.debug(
             "Processing track index=%d source=%s destination=%s",
@@ -585,7 +594,20 @@ def _execute_track_plan(
             task.source,
             actual_dst,
         )
+        if on_track_start:
+            on_track_start(i, len(plan.tasks), task)
         ffmpeg_convert(task.source, actual_dst, task.codec)
         write_tags(actual_dst, task.tags, plan.cover_data)
         if on_progress:
             on_progress(i, len(plan.tasks), task)
+
+    active = [(i, task) for i, task in enumerate(plan.tasks) if not task.skipped]
+
+    if jobs <= 1:
+        for i, task in active:
+            _run_one(i, task)
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            futures = {executor.submit(_run_one, i, task) for i, task in active}
+            for future in as_completed(futures):
+                future.result()

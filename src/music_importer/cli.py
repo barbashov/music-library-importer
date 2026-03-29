@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -105,6 +106,7 @@ def import_album(
         "--http-timeout",
         help="HTTP timeout in seconds for MusicBrainz and cover art requests.",
     ),
+    jobs: int = typer.Option(1, "--jobs", "-j", min=1, help="Number of parallel encoding jobs."),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging for troubleshooting."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress non-error output."),
@@ -155,7 +157,8 @@ def import_album(
     verbose = verbose or effective_debug
     logger.debug(
         "Starting import input_dir=%s output_root=%s dry_run=%s overwrite=%s format=%s "
-        "interactive=%s no_artwork=%s no_tags=%s http_timeout=%s verbose=%s quiet=%s debug=%s",
+        "interactive=%s no_artwork=%s no_tags=%s http_timeout=%s jobs=%d verbose=%s quiet=%s "
+        "debug=%s",
         input_dir,
         output_root,
         dry_run,
@@ -165,6 +168,7 @@ def import_album(
         no_artwork,
         no_tags,
         http_timeout,
+        jobs,
         verbose,
         quiet,
         effective_debug,
@@ -442,7 +446,7 @@ def import_album(
             completed_tracks = idx + 1
 
         try:
-            execute_plan(plan, on_progress=on_progress, overwrite=overwrite)
+            execute_plan(plan, on_progress=on_progress, overwrite=overwrite, jobs=jobs)
         except subprocess.CalledProcessError as exc:
             failed_task = (
                 _task_to_json(plan.tasks[completed_tracks], completed_tracks + 1)
@@ -497,14 +501,34 @@ def import_album(
         console=console,
         disable=quiet,
     ) as progress:
-        task_id = progress.add_task("Converting...", total=len(plan.tasks))
+        task_id = progress.add_task("Preparing...", total=len(plan.tasks))
+        _completed = 0
+        _lock = threading.Lock()
+
+        def on_track_start(idx: int, total: int, task: object) -> None:
+            if jobs == 1:
+                title = (
+                    getattr(task, "tags", {}).get("title", "")
+                    or getattr(task, "destination", Path()).stem
+                )
+                progress.update(task_id, description=f"Encoding {idx + 1}/{total}: {title}")
 
         def on_progress(idx: int, total: int, task: object) -> None:
-            del idx, total
-            title = getattr(task, "tags", {}).get("title", "")
-            progress.update(task_id, advance=1, description=f"Converting: {title}")
+            nonlocal _completed
+            with _lock:
+                _completed += 1
+                done = _completed
+            progress.advance(task_id)
+            if jobs > 1:
+                progress.update(task_id, description=f"Encoding... ({done}/{total} done)")
 
-        execute_plan(plan, on_progress=on_progress, overwrite=overwrite)
+        execute_plan(
+            plan,
+            on_progress=on_progress,
+            on_track_start=on_track_start,
+            overwrite=overwrite,
+            jobs=jobs,
+        )
 
     if not quiet:
         console.print(

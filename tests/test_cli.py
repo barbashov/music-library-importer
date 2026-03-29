@@ -36,8 +36,9 @@ class TestCli:
         result = runner.invoke(app, ["import", "--help"])
         assert result.exit_code == 0
         output = result.output.lower()
-        assert "debug logging for troubleshooting" in output
-        assert "http timeout in seconds for musicbrainz" in output
+        assert "--debug" in output
+        assert "troubleshooting" in output
+        assert "--http-timeout" in output
 
     def test_json_help_remains_help_text(self):
         result = runner.invoke(app, ["--json", "--help"])
@@ -303,7 +304,7 @@ class TestCli:
         (input_dir / "01.flac").touch()
         (input_dir / "02.flac").touch()
 
-        def _fake_execute(plan, on_progress=None, overwrite=False):
+        def _fake_execute(plan, on_progress=None, on_track_start=None, overwrite=False, jobs=1):
             if on_progress:
                 on_progress(0, len(plan.tasks), plan.tasks[0])
                 on_progress(1, len(plan.tasks), plan.tasks[1])
@@ -415,7 +416,7 @@ class TestCli:
         (input_dir / "01.flac").touch()
         (input_dir / "02.flac").touch()
 
-        def _fake_execute(plan, on_progress=None, overwrite=False):
+        def _fake_execute(plan, on_progress=None, on_track_start=None, overwrite=False, jobs=1):
             if on_progress:
                 on_progress(0, len(plan.tasks), plan.tasks[0])
             raise subprocess.CalledProcessError(

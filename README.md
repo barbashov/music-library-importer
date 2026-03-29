@@ -146,6 +146,7 @@ Options:
   --no-artwork               Skip cover art embedding
   --no-tags                  Skip MusicBrainz tagging
   --overwrite                Remove existing output directory before importing
+  --jobs, -j INTEGER         Number of parallel encoding jobs (default: 1)
   --http-timeout FLOAT       HTTP timeout in seconds for MusicBrainz and cover art (default: 15)
   --debug                    Enable debug logging for troubleshooting
   --verbose, -v              Show detailed output
