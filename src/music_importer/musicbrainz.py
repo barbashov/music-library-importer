@@ -32,6 +32,15 @@ _PROXY_ENV_KEYS = (
     "HTTP_PROXY",
     "http_proxy",
 )
+_REISSUE_KEYWORDS = (
+    "anniversary",
+    "deluxe",
+    "edition",
+    "expanded",
+    "reissue",
+    "remaster",
+    "super value",
+)
 
 try:
     import socks
@@ -49,6 +58,12 @@ class _SocksProxyConfig:
     rdns: bool
     scheme: str
     source_env: str
+
+
+@dataclass(frozen=True)
+class ReleaseSelectionHints:
+    expected_discs: int | None = None
+    expected_tracks: int | None = None
 
 
 def _get_https_proxy_from_env() -> tuple[str | None, str | None]:
@@ -124,6 +139,88 @@ def _error_summary(exc: BaseException) -> str:
         if msg:
             return f"{item.__class__.__name__}: {msg}"
     return exc.__class__.__name__
+
+
+def _safe_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _release_score(release: dict) -> int:
+    return _safe_int(release.get("ext:score")) or 0
+
+
+def _release_disc_count(release: dict) -> int | None:
+    count = _safe_int(release.get("medium-count"))
+    if count is not None:
+        return count
+    media = release.get("medium-list", [])
+    return len(media) if media else None
+
+
+def _release_track_count(release: dict) -> int | None:
+    count = _safe_int(release.get("medium-track-count"))
+    if count is not None:
+        return count
+    media = release.get("medium-list", [])
+    total = 0
+    saw_any = False
+    for medium in media:
+        track_count = _safe_int(medium.get("track-count"))
+        if track_count is None:
+            continue
+        saw_any = True
+        total += track_count
+    return total if saw_any else None
+
+
+def _release_date_key(release: dict) -> tuple[int, int, int, int]:
+    date_value = str(release.get("date", "")).strip()
+    if not date_value:
+        return (1, 9999, 12, 31)
+    parts = date_value.split("-")
+    year = _safe_int(parts[0]) if parts else None
+    month = _safe_int(parts[1]) if len(parts) > 1 else None
+    day = _safe_int(parts[2]) if len(parts) > 2 else None
+    if year is None:
+        return (1, 9999, 12, 31)
+    return (0, year, month if month is not None else 12, day if day is not None else 31)
+
+
+def _release_format_rank(release: dict) -> int:
+    media = release.get("medium-list", [])
+    formats = [
+        str(medium.get("format", "")).strip().lower()
+        for medium in media
+        if str(medium.get("format", "")).strip()
+    ]
+    if not formats:
+        return 3
+
+    has_vinyl = any("vinyl" in fmt for fmt in formats)
+    has_non_vinyl = any("vinyl" not in fmt for fmt in formats)
+    if has_vinyl and not has_non_vinyl:
+        return 4
+    if has_vinyl and has_non_vinyl:
+        return 3
+    if any("cd" in fmt for fmt in formats):
+        return 0
+    if any(fmt == "digital media" for fmt in formats):
+        return 1
+    return 2
+
+
+def _reissue_penalty(release: dict) -> int:
+    disambiguation = str(release.get("disambiguation", "")).casefold()
+    if not disambiguation:
+        return 0
+    return sum(1 for keyword in _REISSUE_KEYWORDS if keyword in disambiguation)
 
 
 @contextmanager
@@ -273,16 +370,74 @@ class MusicBrainzClient:
                     self._console.print(f"[red]MusicBrainz search error:[/red] {summary}")
             return []
 
-    def search_release(self, artist: str | None, album: str) -> dict | None:
+    def search_release(
+        self,
+        artist: str | None,
+        album: str,
+        hints: ReleaseSelectionHints | None = None,
+    ) -> dict | None:
         """Search MB for a release, return best match or None."""
-        releases = self.search_releases(artist, album)
+        releases = self.search_releases(artist, album, limit=15)
         if not releases:
             return None
-        # Prefer releases with complete track listings
-        for r in releases:
-            if r.get("medium-list"):
-                return r
-        return releases[0]
+        return self._select_best_release(releases, hints or ReleaseSelectionHints())
+
+    def _select_best_release(self, releases: list[dict], hints: ReleaseSelectionHints) -> dict:
+        top_score = max(_release_score(release) for release in releases)
+        top_candidates = [release for release in releases if _release_score(release) == top_score]
+        ranked = sorted(top_candidates, key=lambda release: self._release_sort_key(release, hints))
+        selected = ranked[0]
+        logger.debug(
+            "MusicBrainz release selection top_score=%d candidates=%d expected_discs=%s "
+            "expected_tracks=%s selected_release_id=%s",
+            top_score,
+            len(ranked),
+            hints.expected_discs,
+            hints.expected_tracks,
+            selected.get("id"),
+        )
+        for idx, candidate in enumerate(ranked[:5], start=1):
+            logger.debug(
+                "MusicBrainz candidate rank=%d release_id=%s score=%d discs=%s tracks=%s "
+                "format_rank=%d reissue_penalty=%d date=%s disambiguation=%r",
+                idx,
+                candidate.get("id"),
+                _release_score(candidate),
+                _release_disc_count(candidate),
+                _release_track_count(candidate),
+                _release_format_rank(candidate),
+                _reissue_penalty(candidate),
+                candidate.get("date", ""),
+                candidate.get("disambiguation", ""),
+            )
+        return selected
+
+    def _release_sort_key(
+        self, release: dict, hints: ReleaseSelectionHints
+    ) -> tuple[int, int, int, int, int, int, tuple[int, int, int, int], str]:
+        release_discs = _release_disc_count(release)
+        release_tracks = _release_track_count(release)
+        disc_match, disc_delta = self._match_quality(release_discs, hints.expected_discs)
+        track_match, track_delta = self._match_quality(release_tracks, hints.expected_tracks)
+        return (
+            0 if release.get("medium-list") else 1,
+            disc_match,
+            track_match,
+            disc_delta,
+            track_delta,
+            _release_format_rank(release) * 10 + _reissue_penalty(release),
+            _release_date_key(release),
+            str(release.get("id", "")),
+        )
+
+    def _match_quality(self, actual: int | None, expected: int | None) -> tuple[int, int]:
+        if expected is None:
+            return (0, 0)
+        if actual is None:
+            return (1, 10_000)
+        if actual == expected:
+            return (0, 0)
+        return (1, abs(actual - expected))
 
     def get_release_details(self, release_id: str) -> ReleaseInfo | None:
         """Fetch full release details and build ReleaseInfo."""

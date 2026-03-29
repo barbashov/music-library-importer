@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from music_importer.musicbrainz import (
     MusicBrainzClient,
+    ReleaseSelectionHints,
     _get_https_proxy_from_env,
     _parse_socks_proxy,
     _socks_proxy_context,
@@ -20,6 +21,38 @@ SAMPLE_RELEASE_LIST = {
         {
             "id": "release-002",
             "title": "Abbey Road (Remaster)",
+        },
+    ]
+}
+
+RANKING_RELEASE_LIST = {
+    "release-list": [
+        {
+            "id": "vinyl-2016",
+            "title": "Sample Album",
+            "ext:score": "100",
+            "date": "2016-02-23",
+            "disambiguation": "super value edition",
+            "medium-count": 4,
+            "medium-track-count": 28,
+            "medium-list": [
+                {"format": '12" Vinyl', "track-count": 7},
+                {"format": '12" Vinyl', "track-count": 7},
+                {"format": '12" Vinyl', "track-count": 7},
+                {"format": '12" Vinyl', "track-count": 7},
+            ],
+        },
+        {
+            "id": "cd-2006",
+            "title": "Sample Album",
+            "ext:score": "100",
+            "date": "2006-05-09",
+            "medium-count": 2,
+            "medium-track-count": 28,
+            "medium-list": [
+                {"format": "CD", "track-count": 14},
+                {"format": "CD", "track-count": 14},
+            ],
         },
     ]
 }
@@ -104,6 +137,87 @@ class TestMusicBrainzClient:
         result = client.search_release("The Beatles", "Abbey Road")
         assert result is not None
         assert result["id"] == "release-001"
+
+    def test_search_release_prefers_source_shape_and_cd_over_vinyl(self, mock_mb):
+        mock_mb.search_releases.return_value = RANKING_RELEASE_LIST
+        client = self._make_client(mock_mb)
+
+        result = client.search_release(
+            "Any Artist",
+            "Sample Album",
+            hints=ReleaseSelectionHints(expected_discs=2, expected_tracks=28),
+        )
+
+        assert result is not None
+        assert result["id"] == "cd-2006"
+
+    def test_search_release_keeps_highest_score_only(self, mock_mb):
+        mock_mb.search_releases.return_value = {
+            "release-list": [
+                {
+                    "id": "vinyl-high-score",
+                    "ext:score": "100",
+                    "medium-count": 4,
+                    "medium-track-count": 28,
+                    "medium-list": [{"format": '12" Vinyl', "track-count": 7}] * 4,
+                },
+                {
+                    "id": "cd-lower-score",
+                    "ext:score": "98",
+                    "medium-count": 2,
+                    "medium-track-count": 28,
+                    "medium-list": [{"format": "CD", "track-count": 14}] * 2,
+                },
+            ]
+        }
+        client = self._make_client(mock_mb)
+
+        result = client.search_release(
+            "Any Artist",
+            "Sample Album",
+            hints=ReleaseSelectionHints(expected_discs=2, expected_tracks=28),
+        )
+
+        assert result is not None
+        assert result["id"] == "vinyl-high-score"
+
+    def test_search_release_prefers_cd_over_digital(self, mock_mb):
+        mock_mb.search_releases.return_value = {
+            "release-list": [
+                {
+                    "id": "digital",
+                    "ext:score": "100",
+                    "date": "2006-05-05",
+                    "medium-count": 2,
+                    "medium-track-count": 28,
+                    "medium-list": [
+                        {"format": "Digital Media", "track-count": 14},
+                        {"format": "Digital Media", "track-count": 14},
+                    ],
+                },
+                {
+                    "id": "cd",
+                    "ext:score": "100",
+                    "date": "2006-05-05",
+                    "medium-count": 2,
+                    "medium-track-count": 28,
+                    "medium-list": [
+                        {"format": "CD", "track-count": 14},
+                        {"format": "CD", "track-count": 14},
+                    ],
+                },
+            ]
+        }
+        client = self._make_client(mock_mb)
+
+        result = client.search_release(
+            "Any Artist",
+            "Sample Album",
+            hints=ReleaseSelectionHints(expected_discs=2, expected_tracks=28),
+        )
+
+        assert result is not None
+        assert result["id"] == "cd"
 
     def test_search_release_returns_none_on_empty(self, mock_mb):
         mock_mb.search_releases.return_value = {"release-list": []}

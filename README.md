@@ -115,7 +115,11 @@ Matching is best-effort and uses multiple hints from your input files.
 6. Query MusicBrainz using the best `artist + album`.
 7. If needed, retry with filename-derived artist.
 8. Retry with album-only lookup when artist is still unknown.
-9. In non-interactive mode, if multiple matches exist, the top result is selected.
+9. In non-interactive mode, release selection uses deterministic ranking:
+   - only candidates with the highest MusicBrainz text score are considered;
+   - source shape hints are preferred first (disc count and total track count);
+   - format is used as a tie-breaker (`CD` > `Digital Media` > other non-vinyl > unknown/mixed > vinyl-only);
+   - reissue-like disambiguation is penalized, then earlier release date is preferred.
 10. If no match is found, import continues with source-tag/filename fallback metadata.
 
 Timeout behavior:

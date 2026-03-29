@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from music_importer.cli import (
     _build_lookup_attempts,
+    _build_release_selection_hints,
     _guess_artist_from_filenames,
     _normalize_album_guess,
     app,
@@ -223,6 +224,49 @@ class TestCli:
         assert "Album" in result.output
         assert "Conversion Plan" in result.output
 
+    @patch("music_importer.cli.read_source_tags")
+    @patch("music_importer.cli.check_external_tools", return_value=[])
+    @patch("music_importer.cli.MusicBrainzClient")
+    def test_noninteractive_musicbrainz_search_uses_selection_hints(
+        self, mock_mb_cls, _mock_tools, mock_read_tags, tmp_path
+    ):
+        input_dir = tmp_path / "Artist" / "Album"
+        input_dir.mkdir(parents=True)
+        (input_dir / "disc1.flac").touch()
+        (input_dir / "disc1.cue").write_text("  TRACK 01 AUDIO\n", encoding="utf-8")
+        mock_read_tags.return_value = {
+            "title": "",
+            "artist": "",
+            "album": "",
+            "albumartist": "",
+            "date": "",
+            "genre": "",
+            "track": 0,
+            "total_tracks": 0,
+            "disc": 0,
+            "total_discs": 0,
+        }
+        mock_mb = mock_mb_cls.return_value
+        mock_mb.search_release.return_value = None
+
+        result = runner.invoke(
+            app,
+            [
+                "import",
+                str(input_dir),
+                str(tmp_path / "output"),
+                "--dry-run",
+                "--format",
+                "alac",
+            ],
+        )
+
+        assert result.exit_code == 0
+        _, kwargs = mock_mb.search_release.call_args
+        hints = kwargs["hints"]
+        assert hints.expected_discs == 1
+        assert hints.expected_tracks == 1
+
     @patch("music_importer.cli.check_external_tools", return_value=[])
     def test_json_dry_run_with_files(self, mock_tools, tmp_path):
         input_dir = tmp_path / "Artist" / "Album"
@@ -391,6 +435,49 @@ class TestCli:
         for file_path in files:
             file_path.touch()
         assert _guess_artist_from_filenames(files) == "The Beatles"
+
+    def test_build_release_selection_hints_from_cues(self, tmp_path):
+        album_dir = tmp_path / "album"
+        album_dir.mkdir()
+        cue1 = album_dir / "disc1.cue"
+        cue2 = album_dir / "disc2.cue"
+        cue1.write_text("  TRACK 01 AUDIO\n  TRACK 02 AUDIO\n", encoding="utf-8")
+        cue2.write_text("  TRACK 01 AUDIO\n", encoding="utf-8")
+
+        hints = _build_release_selection_hints(album_dir, probe_files=[])
+
+        assert hints is not None
+        assert hints.expected_discs == 2
+        assert hints.expected_tracks == 3
+
+    @patch("music_importer.cli.read_source_tags")
+    def test_build_release_selection_hints_prefers_tag_disc_consensus(
+        self, mock_read_tags, tmp_path
+    ):
+        album_dir = tmp_path / "album"
+        album_dir.mkdir()
+        file1 = album_dir / "01.flac"
+        file2 = album_dir / "02.flac"
+        file1.touch()
+        file2.touch()
+        mock_read_tags.return_value = {
+            "title": "",
+            "artist": "",
+            "album": "",
+            "albumartist": "",
+            "date": "",
+            "genre": "",
+            "track": 0,
+            "total_tracks": 0,
+            "disc": 1,
+            "total_discs": 2,
+        }
+
+        hints = _build_release_selection_hints(album_dir, probe_files=[file1, file2])
+
+        assert hints is not None
+        assert hints.expected_discs == 2
+        assert hints.expected_tracks == 2
 
     @patch("music_importer.cli.read_source_tags")
     @patch("music_importer.cli.check_external_tools", return_value=[])

@@ -17,14 +17,16 @@ from rich.tree import Tree
 
 from music_importer import __version__
 from music_importer.config import DEFAULT_COMPILATIONS_DIR
-from music_importer.converter import build_plan, execute_plan
+from music_importer.converter import build_plan, execute_plan, parse_cue_track_count
 from music_importer.debug import configure_debug_logging
 from music_importer.models import ConversionPlan, ReleaseInfo
-from music_importer.musicbrainz import MusicBrainzClient
+from music_importer.musicbrainz import MusicBrainzClient, ReleaseSelectionHints
 from music_importer.tagger import read_source_tags
 from music_importer.utils import (
     check_external_tools,
+    detect_disc_subdirs,
     find_audio_files,
+    find_cue_files,
     has_audio_subdirs,
     infer_artist_album,
     is_generic_dir_name,
@@ -242,6 +244,12 @@ def import_album(
                 )
         else:
             attempts = _build_lookup_attempts(artist_guess, album_guess, filename_artist_guess)
+            selection_hints = _build_release_selection_hints(input_dir, probe_files)
+            logger.debug(
+                "MusicBrainz selection hints expected_discs=%s expected_tracks=%s",
+                selection_hints.expected_discs if selection_hints else None,
+                selection_hints.expected_tracks if selection_hints else None,
+            )
             if interactive:
                 for query_artist, query_album in attempts:
                     if not quiet and not json_mode:
@@ -261,7 +269,11 @@ def import_album(
                             f"[dim]Searching MusicBrainz:[/dim] "
                             f"{_format_lookup_query(query_artist, query_album)}"
                         )
-                    release = mb_client.search_release(query_artist, query_album)
+                    release = mb_client.search_release(
+                        query_artist,
+                        query_album,
+                        hints=selection_hints,
+                    )
                     if not release:
                         continue
                     release_id = release["id"]
@@ -646,6 +658,57 @@ def _build_lookup_attempts(
         add_attempt(filename_artist_guess, album_guess)
     add_attempt(None, album_guess)
     return attempts
+
+
+def _build_release_selection_hints(
+    input_dir: Path, probe_files: list[Path]
+) -> ReleaseSelectionHints | None:
+    cue_files = find_cue_files(input_dir)
+    if cue_files:
+        track_total = sum(
+            count for count in (parse_cue_track_count(cue) for cue in cue_files) if count > 0
+        )
+        return ReleaseSelectionHints(
+            expected_discs=len(cue_files),
+            expected_tracks=track_total or None,
+        )
+
+    expected_discs: int | None = None
+    expected_tracks: int | None = None
+
+    direct_files = find_audio_files(input_dir)
+    if direct_files:
+        expected_tracks = len(direct_files)
+        expected_discs = 1
+    else:
+        disc_subdirs = detect_disc_subdirs(input_dir)
+        if disc_subdirs:
+            expected_discs = len(disc_subdirs)
+            expected_tracks = sum(len(find_audio_files(path)) for _, path in disc_subdirs) or None
+        else:
+            audio_subdirs = has_audio_subdirs(input_dir)
+            if audio_subdirs:
+                expected_discs = len(audio_subdirs)
+                expected_tracks = sum(len(find_audio_files(path)) for path in audio_subdirs) or None
+
+    total_discs_counter: Counter[int] = Counter()
+    max_disc_tag = 0
+    for file_path in probe_files:
+        tags = read_source_tags(file_path)
+        total_discs = int(tags.get("total_discs", 0) or 0)
+        disc_num = int(tags.get("disc", 0) or 0)
+        if total_discs > 0:
+            total_discs_counter[total_discs] += 1
+        if disc_num > max_disc_tag:
+            max_disc_tag = disc_num
+    if total_discs_counter:
+        expected_discs = total_discs_counter.most_common(1)[0][0]
+    elif max_disc_tag > 1:
+        expected_discs = max_disc_tag
+
+    if expected_discs is None and expected_tracks is None:
+        return None
+    return ReleaseSelectionHints(expected_discs=expected_discs, expected_tracks=expected_tracks)
 
 
 def _format_lookup_query(artist: str | None, album: str) -> str:
