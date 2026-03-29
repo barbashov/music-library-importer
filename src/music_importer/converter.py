@@ -156,7 +156,7 @@ def split_cue(cue_file: Path, audio_file: Path, tmp_dir: Path) -> list[Path]:
             "-f",
             str(cue_file),
             "-o",
-            "wav",
+            "flac",
             str(audio_file),
             "-t",
             "%n",
@@ -164,7 +164,7 @@ def split_cue(cue_file: Path, audio_file: Path, tmp_dir: Path) -> list[Path]:
         capture_output=True,
         text=True,
     )
-    return sorted(tmp_dir.glob("*.wav"))
+    return sorted(tmp_dir.glob("*.flac"))
 
 
 def parse_cue_titles(cue_file: Path) -> list[str]:
