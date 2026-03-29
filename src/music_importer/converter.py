@@ -144,6 +144,16 @@ def ffmpeg_convert(src: Path, dst: Path, codec: str) -> None:
     _run_logged(cmd, text=True)
 
 
+def parse_cue_file_reference(cue_file: Path) -> str | None:
+    """Return the filename referenced by the first FILE directive in a CUE sheet."""
+    with open(cue_file, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = re.match(r'\s*FILE\s+"(.+)"\s+\S+', line)
+            if m:
+                return m.group(1)
+    return None
+
+
 def parse_cue_timestamps(cue_file: Path) -> list[float]:
     """Return INDEX 01 start times in seconds for each track."""
     timestamps: list[float] = []
@@ -323,7 +333,30 @@ def build_plan(
 
     if cue_files:
         _build_cue_plan(plan, cue_files, track_map, force_format, dry_run)
-    else:
+
+    if not plan.tasks:
+        # CUE files were found but none had a matching audio file.  Check whether
+        # the directory contains a single audio file — if so, it is almost
+        # certainly the unsplit CUE target with a mismatched filename.  Falling
+        # back in that case would silently produce one huge track, so we raise an
+        # error instead with an actionable message.
+        if cue_files:
+            direct_audio = find_audio_files(input_dir)
+            if len(direct_audio) <= len(cue_files):
+                # Audio file count <= CUE file count: each CUE was almost certainly
+                # meant to pair with one audio file that just has a mismatched name.
+                # Falling back would silently encode N unsplit files as N single tracks.
+                cue_ref = parse_cue_file_reference(cue_files[0])
+                expected = f" (CUE expects: {cue_ref!r})" if cue_ref else ""
+                found = f" Found: {', '.join(f.name for f in direct_audio)}" if direct_audio else ""
+                raise ValueError(
+                    f"CUE file {cue_files[0].name!r} found but its audio file could not be"
+                    f" matched{expected}.{found} Rename the audio file to match the CUE's"
+                    f" FILE reference, or remove the CUE file to import the tracks directly."
+                )
+
+        # No CUE files, or CUE files had no matching audio and multiple individual
+        # tracks exist — fall back to processing individual track files.
         _build_track_plan(plan, track_map, force_format)
 
     return plan
@@ -530,7 +563,11 @@ def execute_plan(
     plan.output_dir.parent.mkdir(parents=True, exist_ok=True)
     temp_dir = Path(tempfile.mkdtemp(dir=plan.output_dir.parent, prefix=".tmp-"))
     try:
-        if cue_files:
+        cue_matched = any(
+            any(cue_file.with_suffix(ext).exists() for ext in ALL_AUDIO_EXTS)
+            for cue_file in cue_files
+        )
+        if cue_files and cue_matched:
             _execute_cue_plan(plan, cue_files, on_progress, on_track_start, temp_dir)
         else:
             _execute_track_plan(plan, on_progress, on_track_start, temp_dir, jobs)

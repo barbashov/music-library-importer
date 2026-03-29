@@ -1,11 +1,14 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from music_importer.converter import (
     _build_tags_dict,
     _collect_disc_files,
     build_plan,
     detect_codec,
+    parse_cue_file_reference,
     parse_cue_titles,
     parse_cue_track_count,
 )
@@ -77,6 +80,16 @@ class TestParseCue:
         cue.write_text("")
         assert parse_cue_titles(cue) == []
         assert parse_cue_track_count(cue) == 0
+
+    def test_parse_file_reference(self, tmp_path):
+        cue = tmp_path / "album.cue"
+        cue.write_text('FILE "The Album.flac" WAVE\n  TRACK 01 AUDIO\n')
+        assert parse_cue_file_reference(cue) == "The Album.flac"
+
+    def test_parse_file_reference_missing(self, tmp_path):
+        cue = tmp_path / "album.cue"
+        cue.write_text("  TRACK 01 AUDIO\n")
+        assert parse_cue_file_reference(cue) is None
 
 
 class TestCollectDiscFiles:
@@ -258,6 +271,92 @@ class TestBuildPlan:
 
         assert len(plan.tasks) == 0
         assert any("No audio files" in w for w in plan.warnings)
+
+    def test_cue_with_mismatched_single_audio_raises(self, tmp_path):
+        """1 CUE + 1 audio file with wrong name → error, not silent single-track import."""
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        cue = input_dir / "The Album.cue"
+        cue.write_text(
+            'FILE "The Album.flac" WAVE\n'
+            "  TRACK 01 AUDIO\n"
+            '    TITLE "Song A"\n'
+            "    INDEX 01 00:00:00\n"
+            "  TRACK 02 AUDIO\n"
+            '    TITLE "Song B"\n'
+            "    INDEX 01 03:00:00\n"
+        )
+        # The actual file has a different name — not what the CUE expects
+        (input_dir / "wrongname.flac").touch()
+
+        output_dir = tmp_path / "output" / "Artist" / "Album"
+
+        with pytest.raises(ValueError, match="The Album.flac"):
+            build_plan(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                release_info=None,
+                artist="Artist",
+                album="Album",
+                year="2020",
+                genre="",
+                force_format=None,
+            )
+
+    def test_multidisc_cue_with_mismatched_audio_raises(self, tmp_path):
+        """2 CUEs + 2 wrong-named FLACs (multi-disc) → error, not silent 2-track import."""
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        for disc in ("CD1", "CD2"):
+            cue = input_dir / f"{disc}.cue"
+            cue.write_text(f'FILE "{disc}.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n')
+        (input_dir / "disc1_wrongname.flac").touch()
+        (input_dir / "disc2_wrongname.flac").touch()
+
+        output_dir = tmp_path / "output" / "Artist" / "Album"
+
+        with pytest.raises(ValueError, match="audio file could not be matched"):
+            build_plan(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                release_info=None,
+                artist="Artist",
+                album="Album",
+                year="2020",
+                genre="",
+                force_format=None,
+            )
+
+    def test_cue_without_matching_audio_falls_back_to_individual_tracks(self, tmp_path):
+        """CUE present but no matching audio file; multiple FLACs exist → fall back."""
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        cue = input_dir / "album.cue"
+        cue.write_text(
+            'FILE "album.flac" WAVE\n'
+            "  TRACK 01 AUDIO\n"
+            '    TITLE "Song A"\n'
+            "    INDEX 01 00:00:00\n"
+        )
+        # Individual pre-split tracks (no single album.flac)
+        (input_dir / "01 - Song A.flac").touch()
+        (input_dir / "02 - Song B.flac").touch()
+
+        output_dir = tmp_path / "output" / "Artist" / "Album"
+
+        plan = build_plan(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            release_info=None,
+            artist="Artist",
+            album="Album",
+            year="2020",
+            genre="",
+            force_format="alac",
+        )
+
+        # Should have processed the 2 individual files, not the (missing) CUE target
+        assert len(plan.tasks) == 2
 
 
 class TestBuildTagsDict:
