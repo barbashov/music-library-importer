@@ -401,6 +401,7 @@ def import_album(
         _print_album_header(plan)
 
     if json_mode:
+
         def on_progress(idx: int, total: int, task: object) -> None:
             del total, task
             nonlocal completed_tracks
